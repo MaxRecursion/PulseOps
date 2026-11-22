@@ -1,0 +1,10 @@
+DataCat
+Copyright 2026 The DataCat authors
+
+PulseOps contains modified, translated portions of DataCat's search compiler,
+from artifacts/api-server/src/query/search.ts and the recovery threshold in
+artifacts/api-server/src/jobs/monitors.ts at commit
+c016efb70de792f5beeb7b2d1266830087910343.
+Upstream: https://github.com/replit/datacat
+
+The adapted code is licensed under Apache License, Version 2.0 (see LICENSE).

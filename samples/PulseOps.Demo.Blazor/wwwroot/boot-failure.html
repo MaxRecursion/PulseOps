@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ledgerline · Simulated startup failure</title>
+    <base href="/">
+    <link rel="stylesheet" href="demo.css">
+    <script src="/pulseops/demo-config.js" defer></script>
+    <script id="pulseops-bootstrap" src="_content/PulseOps.Sdk.Blazor/bootstrap.js" data-application="finance-demo" data-environment="demo"
+        data-version="1.0.0"
+        data-startup-timeout-ms="4000" defer></script>
+    <script src="_framework/ledgerline-simulated-missing-asset.js" autostart="false" defer></script>
+    <script src="demo-start.js" defer></script>
+</head>
+<body>
+    <main class="panel simulation-page">
+        <p class="eyebrow">PulseOps simulation</p>
+        <h1>Startup failure</h1>
+        <p>This page requests a missing framework script. The bootstrap monitor reports the resource failure and readiness timeout directly from the browser.</p>
+        <a href="/">Return to Ledgerline</a>
+    </main>
+    <div id="app"></div>
+</body>
+</html>

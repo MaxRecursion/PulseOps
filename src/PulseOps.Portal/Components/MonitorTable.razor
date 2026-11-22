@@ -1,0 +1,71 @@
+<div class="table-scroll">
+    <table class="data-table monitor-table">
+        <thead><tr>
+            <th scope="col">Monitor</th><th scope="col">State</th><th scope="col">Type</th><th scope="col">Target</th>
+            <th scope="col">Threshold</th><th scope="col" class="numeric">Observed</th><th scope="col" class="numeric">Baseline</th>
+            <th scope="col" class="numeric">Samples</th><th scope="col">Evaluated (UTC)</th><th scope="col">Source</th><th scope="col">Incident</th>
+        </tr></thead>
+        <tbody>
+            @foreach (var monitor in Monitors)
+            {
+                <tr>
+                    <td>
+                        <strong class="table-main">@monitor.Name</strong>
+                        <small class="table-secondary">@AppLabel(monitor.Application) · @Presentation.Title(monitor.Environment)</small>
+                        @if (!string.IsNullOrWhiteSpace(monitor.Detail))
+                        {
+                            <small class="table-secondary monitor-detail">@monitor.Detail</small>
+                        }
+                    </td>
+                    <td>
+                        <Badge Text="@MonitorText.StateLabel(monitor.State)" Tone="@MonitorText.StateTone(monitor.State)" Dot="true" />
+                        @if (monitor.Since is { } since)
+                        {
+                            <small class="table-secondary">since <time datetime="@since.ToString("O")" title="@Presentation.Date(since)">@Presentation.ShortDate(since)</time></small>
+                        }
+                    </td>
+                    <td>@MonitorText.TypeLabel(monitor.Type)<small class="table-secondary">@Presentation.Title(monitor.Severity) severity</small></td>
+                    <td>@MonitorText.Target(monitor.Kind, monitor.Target)<small class="table-secondary">@EventKinds.LabelFor(monitor.Kind)</small></td>
+                    <td class="rule-text">@MonitorText.Threshold(monitor.Definition)</td>
+                    <td class="numeric">@MonitorText.Value(monitor.Type, monitor.Observed)</td>
+                    <td class="numeric">@MonitorText.Value(monitor.Type, monitor.Baseline)</td>
+                    <td class="numeric">@(monitor.Samples is long samples ? Presentation.Count(samples) : "—")</td>
+                    <td>
+                        @if (monitor.EvaluatedAt is { } evaluated)
+                        {
+                            <time datetime="@evaluated.ToString("O")" title="@Presentation.Date(evaluated)">@Presentation.ShortDate(evaluated)</time>
+                        }
+                        else
+                        {
+                            <span class="text-neutral">Not yet evaluated</span>
+                        }
+                    </td>
+                    <td>
+                        <Badge Text="@MonitorText.SourceLabel(monitor.Source)" Tone="@(monitor.Source == "administration" ? "accent" : "neutral")" />
+                        @if (monitor.Source == "administration")
+                        {
+                            <small class="table-secondary">Revision @monitor.Revision</small>
+                        }
+                    </td>
+                    <td>
+                        @if (monitor.IncidentId is { Length: > 0 } incident)
+                        {
+                            <a class="record-link" href="@Scope.For(monitor.Application, monitor.Environment).Url("incidents/" + Uri.EscapeDataString(incident))">View incident<span class="sr-only">@($" for {monitor.Name}")</span></a>
+                        }
+                        else
+                        {
+                            <span class="text-neutral">—</span>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    [CascadingParameter] public PortalContext Context { get; set; } = null!;
+    [Parameter, EditorRequired] public IReadOnlyList<MonitorStatus> Monitors { get; set; } = [];
+    [Parameter, EditorRequired] public ViewScope Scope { get; set; } = null!;
+    private string AppLabel(string value) => Context.Scopes.FirstOrDefault(scope => scope.Application == value)?.Label ?? value;
+}

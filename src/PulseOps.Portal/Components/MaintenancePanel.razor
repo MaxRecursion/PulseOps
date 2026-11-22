@@ -1,0 +1,212 @@
+@implements IDisposable
+@inject PortalApi Api
+
+<section class="panel" aria-labelledby="maintenance-title">
+    <div class="panel-head">
+        <div>
+            <h2 id="maintenance-title">Maintenance windows</h2>
+            <p>While a window is active, notifications for its scope are held back and incidents record a maintenance note. Times are UTC.</p>
+        </div>
+    </div>
+    @if (Windows.Count == 0)
+    {
+        <DataState IconName="clock" EmptyTitle="No current or scheduled windows" EmptyText="Approved maintenance proposals appear here." />
+    }
+    else
+    {
+        <div class="table-scroll">
+            <table class="data-table">
+                <thead><tr>
+                    <th scope="col">Scope</th><th scope="col">Status</th><th scope="col">Starts (UTC)</th><th scope="col">Ends (UTC)</th>
+                    <th scope="col">Reason</th><th scope="col">Created by</th>
+                </tr></thead>
+                <tbody>
+                    @foreach (var window in Windows)
+                    {
+                        var status = Status(window);
+                        <tr>
+                            <td>@ScopeLabel(window.Application, window.Environment)<small class="table-secondary mono" title="@window.Id">@Presentation.Id(window.Id)</small></td>
+                            <td><Badge Text="@status" Tone="@(status == "Active" ? "warning" : status == "Scheduled" ? "accent" : "neutral")" Dot="true" /></td>
+                            <td><time datetime="@window.StartsAt.ToString("O")">@Presentation.Date(window.StartsAt)</time></td>
+                            <td><time datetime="@window.EndsAt.ToString("O")">@Presentation.Date(window.EndsAt)</time></td>
+                            <td class="wrap-cell">@window.Reason</td>
+                            <td class="mono">@window.CreatedBy<small class="table-secondary">@Presentation.Date(window.CreatedAt)</small></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+    @if (Context.CanPropose && Context.Scopes.Length > 0)
+    {
+        <div class="form-columns">
+            <form class="detail-form" @onsubmit="ProposeWindowAsync" @onsubmit:preventDefault aria-labelledby="schedule-window-title">
+                <h3 id="schedule-window-title">Propose a window</h3>
+                <div class="field">
+                    <label for="maintenance-scope">Application environment</label>
+                    <select id="maintenance-scope" @bind="_scope">
+                        @foreach (var scope in Context.Scopes.OrderBy(scope => scope.Label).ThenBy(scope => scope.Environment))
+                        {
+                            <option value="@(scope.Application + "|" + scope.Environment)">@scope.Label · @Presentation.Title(scope.Environment)</option>
+                        }
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="maintenance-starts">Starts (UTC)</label>
+                    <input id="maintenance-starts" type="datetime-local" required aria-describedby="maintenance-utc-hint"
+                           value="@_starts" @onchange="args => _starts = args.Value?.ToString() ?? string.Empty" />
+                </div>
+                <div class="field">
+                    <label for="maintenance-ends">Ends (UTC)</label>
+                    <input id="maintenance-ends" type="datetime-local" required aria-describedby="maintenance-utc-hint"
+                           value="@_ends" @onchange="args => _ends = args.Value?.ToString() ?? string.Empty" />
+                    <small id="maintenance-utc-hint" class="field-hint">Enter times in UTC. Your device time zone is not applied.</small>
+                </div>
+                <div class="field">
+                    <label for="maintenance-reason">Reason for the reviewer</label>
+                    <textarea id="maintenance-reason" maxlength="500" rows="2" required placeholder="Planned release, database patching…"
+                              @bind="_reason" @bind:event="oninput"></textarea>
+                </div>
+                @if (_createError is not null)
+                {
+                    <p class="text-danger" role="alert">@_createError</p>
+                }
+                @if (_createNotice is not null)
+                {
+                    <p class="text-good" role="status">@_createNotice</p>
+                }
+                <button class="button primary" type="submit" disabled="@_submitting">Propose window</button>
+            </form>
+            @if (Cancellable.Any())
+            {
+                <form class="detail-form" @onsubmit="ProposeCancellationAsync" @onsubmit:preventDefault aria-labelledby="cancel-window-title">
+                    <h3 id="cancel-window-title">Propose a cancellation</h3>
+                    <div class="field">
+                        <label for="maintenance-cancel">Window</label>
+                        <select id="maintenance-cancel" @bind="_cancelId">
+                            @foreach (var window in Cancellable)
+                            {
+                                <option value="@window.Id">@ScopeLabel(window.Application, window.Environment) · @Presentation.ShortDate(window.StartsAt)–@Presentation.ShortDate(window.EndsAt) UTC</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="maintenance-cancel-reason">Reason for the reviewer</label>
+                        <textarea id="maintenance-cancel-reason" maxlength="500" rows="2" required @bind="_cancelReason" @bind:event="oninput"></textarea>
+                    </div>
+                    @if (_cancelError is not null)
+                    {
+                        <p class="text-danger" role="alert">@_cancelError</p>
+                    }
+                    @if (_cancelNotice is not null)
+                    {
+                        <p class="text-good" role="status">@_cancelNotice</p>
+                    }
+                    <button class="button danger" type="submit" disabled="@_submitting">Propose cancellation</button>
+                </form>
+            }
+        </div>
+    }
+</section>
+
+@code {
+    private readonly CancellationTokenSource _lifetime = new();
+    private string _scope = "";
+    private string _starts = "";
+    private string _ends = "";
+    private string _reason = "";
+    private string _cancelId = "";
+    private string _cancelReason = "";
+    private string? _createError, _createNotice, _cancelError, _cancelNotice;
+    private bool _submitting;
+
+    [CascadingParameter] public PortalContext Context { get; set; } = null!;
+    [Parameter, EditorRequired] public IReadOnlyList<MaintenanceWindow> Windows { get; set; } = [];
+    [Parameter] public EventCallback<string> Proposed { get; set; }
+
+    private IEnumerable<MaintenanceWindow> Cancellable => Windows.Where(window => window.CancelledAt is null && window.EndsAt > DateTimeOffset.UtcNow);
+
+    protected override void OnInitialized()
+    {
+        var first = Context.Scopes.OrderBy(scope => scope.Label).ThenBy(scope => scope.Environment).FirstOrDefault();
+        _scope = first is null ? "" : first.Application + "|" + first.Environment;
+        var start = DateTimeOffset.UtcNow;
+        start = new DateTimeOffset(start.Year, start.Month, start.Day, start.Hour, 0, 0, TimeSpan.Zero).AddHours(1);
+        (_starts, _ends) = (MaintenanceRules.ToInput(start), MaintenanceRules.ToInput(start.AddHours(1)));
+    }
+
+    protected override void OnParametersSet()
+    {
+        if (!Cancellable.Any(window => window.Id == _cancelId))
+            _cancelId = Cancellable.FirstOrDefault()?.Id ?? "";
+    }
+
+    private static string Status(MaintenanceWindow window) =>
+        window.CancelledAt is not null ? "Cancelled" : window.Active ? "Active" : window.EndsAt <= DateTimeOffset.UtcNow ? "Ended" : "Scheduled";
+
+    private async Task ProposeWindowAsync()
+    {
+        _createNotice = null;
+        var parts = _scope.Split('|', 2);
+        var starts = MaintenanceRules.ParseUtc(_starts);
+        var ends = MaintenanceRules.ParseUtc(_ends);
+        _createError = parts.Length != 2 || !Context.Scopes.Any(scope => scope.Application == parts[0] && scope.Environment == parts[1])
+            ? "Choose an application environment."
+            : MaintenanceRules.Validate(starts, ends, DateTimeOffset.UtcNow) ?? MonitorRules.ReasonProblem(_reason);
+        if (_createError is not null || starts is not { } from || ends is not { } until)
+            return;
+
+        var reason = _reason.Trim();
+        var proposal = new ChangeProposal("maintenance", "create",
+            Maintenance: new MaintenanceProposal(parts[0], parts[1], from, until, reason), Reason: reason);
+        if (await SubmitAsync(proposal, error => _createError = error))
+        {
+            _reason = "";
+            _createNotice = $"Maintenance window proposed for {Presentation.Date(from)} to {Presentation.Date(until)}. It applies once approved.";
+            await Proposed.InvokeAsync(_createNotice);
+        }
+    }
+
+    private async Task ProposeCancellationAsync()
+    {
+        _cancelNotice = null;
+        var window = Cancellable.FirstOrDefault(item => item.Id == _cancelId);
+        _cancelError = window is null ? "Choose a window to cancel." : MonitorRules.ReasonProblem(_cancelReason);
+        if (_cancelError is not null || window is null)
+            return;
+
+        var proposal = new ChangeProposal("maintenance", "cancel", Application: window.Application, Environment: window.Environment,
+            Target: window.Id, Reason: _cancelReason.Trim());
+        if (await SubmitAsync(proposal, error => _cancelError = error))
+        {
+            _cancelReason = "";
+            _cancelNotice = "Cancellation proposed. The window stays in effect until the change is approved.";
+            await Proposed.InvokeAsync(_cancelNotice);
+        }
+    }
+
+    private async Task<bool> SubmitAsync(ChangeProposal proposal, Action<string> fail)
+    {
+        if (_submitting)
+            return false;
+        _submitting = true;
+        try
+        {
+            await Api.ProposeChangeAsync(proposal, Context.CsrfToken, _lifetime.Token);
+            return true;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return false; }
+        catch (PortalRequestException exception) { fail(exception.Message); return false; }
+        catch (Exception) { fail("Could not submit the proposal. Check your connection and retry."); return false; }
+        finally { _submitting = false; }
+    }
+
+    private string ScopeLabel(string application, string environment) =>
+        $"{Context.Scopes.FirstOrDefault(scope => scope.Application == application)?.Label ?? application} · {Presentation.Title(environment)}";
+
+    public void Dispose()
+    {
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+}

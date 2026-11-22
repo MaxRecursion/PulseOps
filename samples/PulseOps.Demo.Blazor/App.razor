@@ -1,0 +1,233 @@
+@inject IHttpClientFactory Clients
+@inject PulseOpsClient PulseOps
+@inject IJSRuntime JavaScript
+
+<PulseOpsReady />
+<header class="topbar">
+    <a class="brand" href="/" aria-label="Ledgerline home"><span class="brand-mark" aria-hidden="true">L</span> Ledgerline</a>
+    <span class="badge">Simulation</span>
+</header>
+<main>
+    <section class="headline">
+        <div>
+            <p class="eyebrow">Finance operations</p>
+            <h1>Reporting workspace</h1>
+            <p>Generate a simulated report and see the resulting session, dependencies and failures in PulseOps.</p>
+        </div>
+        <a class="link" href="/pulseops/portal" target="_blank" rel="noopener">Open PulseOps <span aria-hidden="true">↗</span></a>
+    </section>
+
+    <div class="workspace">
+        <section class="panel settings" aria-labelledby="controls-heading">
+            <h2 id="controls-heading">Run a scenario</h2>
+            <label for="scenario">Reporting scenario</label>
+            <select id="scenario" @bind="_scenario" disabled="@_busy">
+                <option value="normal">Generate report</option>
+                <option value="slow">Slow SAP dependency</option>
+                <option value="timeout">SAP gateway timeout</option>
+                <option value="http500">HTTP 500</option>
+                <option value="http503">HTTP 503</option>
+                <option value="auth">Authentication failure</option>
+                <option value="invalid">Invalid CSV response</option>
+                <option value="large">Large CSV download</option>
+                <option value="slow-parse">Slow CSV parsing</option>
+                <option value="business">Business rule failure</option>
+            </select>
+            <button class="primary" @onclick="RunAsync" disabled="@_busy">@(_busy ? "Running…" : "Run report")</button>
+            <div class="divider"></div>
+            <h3>Browser diagnostics</h3>
+            <button class="subtle" @onclick="RaiseJavaScriptAsync">Raise a JavaScript error</button>
+            <button class="subtle" @onclick="RaiseRenderException">Raise a rendering error</button>
+            <a class="subtle" href="/boot-failure.html" target="_blank" rel="noopener">Open a page with a startup failure ↗</a>
+        </section>
+        <section class="results" aria-label="Report results">
+            <div class="summary">
+                <div class="panel stat"><span>Records processed</span><strong>@_records.ToString("N0", CultureInfo.InvariantCulture)</strong></div>
+                <div class="panel stat"><span>Run time</span><strong>@(_milliseconds is { } elapsed ? $"{elapsed:N0} ms" : "—")</strong></div>
+            </div>
+            <section class="panel report">
+                <div class="report-header">
+                    <div><h2>Reporting preview</h2><p>First eight rows of the simulated report</p></div>
+                    <span class="result @_statusClass" role="status">@_status</span>
+                </div>
+                @if (_rows.Count == 0)
+                {
+                    <p class="empty">@_description</p>
+                }
+                else
+                {
+                    <div class="table-scroll">
+                        <table>
+                            <thead><tr><th scope="col">Ledger</th><th scope="col">Cost centre</th><th scope="col" class="number">Variance</th></tr></thead>
+                            <tbody>
+                                @foreach (var row in _rows)
+                                {
+                                    <tr><td>@row.Ledger</td><td>@row.CostCenter</td><td class="number">@row.Variance.ToString("C0", CultureInfo.GetCultureInfo("en-US"))</td></tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+                <PulseOpsErrorBoundary @ref="_boundary">
+                    <ChildContent>
+                        @if (_renderFailure)
+                        {
+                            <FailureTile />
+                        }
+                    </ChildContent>
+                    <ErrorContent>
+                        <div class="render-error" role="alert">
+                            <p>Rendering failure recorded.</p>
+                            <button class="subtle" @onclick="Recover">Recover this panel</button>
+                        </div>
+                    </ErrorContent>
+                </PulseOpsErrorBoundary>
+            </section>
+        </section>
+    </div>
+</main>
+
+@code {
+    private string _scenario = "normal";
+    private bool _busy;
+    private bool _renderFailure;
+    private PulseOpsErrorBoundary? _boundary;
+    private readonly List<LedgerRow> _rows = [];
+    private int _records;
+    private double? _milliseconds;
+    private string _status = "Ready";
+    private string _statusClass = "";
+    private string _description = "Run a scenario to preview the report.";
+
+    private async Task RunAsync()
+    {
+        if (_busy)
+            return;
+
+        _busy = true;
+        _status = "Running";
+        _statusClass = "";
+        _records = 0;
+        _milliseconds = null;
+        _rows.Clear();
+        _description = "Waiting for the reporting dependency…";
+        var timestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+        using var report = PulseOps.StartOperation("generate-report");
+
+        try
+        {
+            using var http = Clients.CreateClient("Reports");
+            using var response = await http.GetAsync("api/report?scenario=" + Uri.EscapeDataString(_scenario), HttpCompletionOption.ResponseHeadersRead);
+            if (_scenario == "auth")
+            {
+                using var signIn = PulseOps.StartOperation("sign-in");
+                signIn.SetFailure(new UnauthorizedAccessException());
+            }
+            response.EnsureSuccessStatusCode();
+
+            string csv;
+            using (var download = PulseOps.StartOperation("download-report"))
+            {
+                try
+                {
+                    csv = await response.Content.ReadAsStringAsync();
+                    download.SetSuccess();
+                }
+                catch (Exception error)
+                {
+                    download.SetFailure(error);
+                    throw;
+                }
+            }
+
+            List<LedgerRow> preview;
+            using (var parse = PulseOps.StartOperation("parse-report"))
+            {
+                try
+                {
+                    if (_scenario == "slow-parse")
+                        await Task.Delay(1600);
+                    (preview, _records) = ReadCsv(csv);
+                    parse.SetSuccess();
+                }
+                catch (Exception error)
+                {
+                    parse.SetFailure(error);
+                    throw;
+                }
+            }
+
+            if (_scenario == "business")
+                throw new InvalidOperationException("Simulated finance rule failure.");
+
+            using (var grid = PulseOps.StartOperation("render-grid"))
+            {
+                _rows.AddRange(preview);
+                grid.SetSuccess();
+            }
+
+            report.SetSuccess();
+            _status = "Completed";
+            _statusClass = "ok";
+        }
+        catch (Exception error)
+        {
+            report.SetFailure(error);
+            if (error is FormatException or InvalidOperationException)
+                PulseOps.ReportException(error);
+            _status = "Failed";
+            _statusClass = "bad";
+            _description = error switch
+            {
+                HttpRequestException { StatusCode: { } code } => $"The simulated reporting API returned HTTP {(int)code}.",
+                FormatException => "The simulated response did not match the report schema.",
+                InvalidOperationException => "A simulated business rule rejected the report.",
+                _ => "The reporting request could not be completed."
+            };
+        }
+        finally
+        {
+            _milliseconds = System.Diagnostics.Stopwatch.GetElapsedTime(timestamp).TotalMilliseconds;
+            _busy = false;
+        }
+    }
+
+    private static (List<LedgerRow> Preview, int Count) ReadCsv(string csv)
+    {
+        using var reader = new StringReader(csv);
+        if (reader.ReadLine() != "ledger,cost-centre,variance")
+            throw new FormatException();
+
+        var rows = new List<LedgerRow>(8);
+        var count = 0;
+        while (reader.ReadLine() is { } line)
+        {
+            if (rows.Count < 8)
+            {
+                var columns = line.Split(',');
+                if (columns.Length != 3 ||
+                    !decimal.TryParse(columns[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var variance))
+                    throw new FormatException();
+                rows.Add(new(columns[0], columns[1], variance));
+            }
+            count++;
+        }
+        return (rows, count);
+    }
+
+    private Task RaiseJavaScriptAsync() => JavaScript.InvokeVoidAsync("PulseOpsDemo.raiseJavaScriptError").AsTask();
+
+    private void RaiseRenderException()
+    {
+        _boundary?.Recover();
+        _renderFailure = true;
+    }
+
+    private void Recover()
+    {
+        _renderFailure = false;
+        _boundary?.Recover();
+    }
+
+    private sealed record LedgerRow(string Ledger, string CostCenter, decimal Variance);
+}

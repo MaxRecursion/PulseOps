@@ -1,0 +1,317 @@
+@implements IDisposable
+@inject PortalApi Api
+
+<section class="panel" aria-labelledby="propose-monitor-title">
+    <div class="panel-head">
+        <div>
+            <h2 id="propose-monitor-title">Propose a monitor</h2>
+            <p>Creates a monitor or updates one managed in Change control. It is evaluated only after a platform administrator approves it.</p>
+        </div>
+    </div>
+    @if (Context.Scopes.Length == 0)
+    {
+        <DataState IconName="admin" EmptyTitle="No application environments assigned"
+                   EmptyText="Ask a platform administrator to grant your group access to an application environment." />
+    }
+    else
+    {
+        <form class="detail-form proposal-form" @onsubmit="SubmitAsync" @onsubmit:preventDefault>
+            @if (_editing)
+            {
+                <p class="inline-notice edit-notice" role="status"><Icon Name="info" Size="16" /> Editing @_draft.Name. Submitting proposes an update to this monitor.</p>
+            }
+            <fieldset>
+                <legend>Scope and signal</legend>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="monitor-scope">Application environment</label>
+                        <select id="monitor-scope" value="@ScopeKey" @onchange="ChangeScope">
+                            @foreach (var scope in Scopes)
+                            {
+                                <option value="@(scope.Application + "|" + scope.Environment)">@scope.Label · @Presentation.Title(scope.Environment)</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="monitor-name">Monitor name</label>
+                        <input id="monitor-name" @ref="_nameInput" maxlength="64" required autocomplete="off" placeholder="checkout-latency"
+                               aria-describedby="monitor-name-hint" @bind="_draft.Name" />
+                        <small id="monitor-name-hint" class="field-hint">Letters, digits, dots, underscores or hyphens.</small>
+                    </div>
+                    <div class="field">
+                        <label for="monitor-type">Monitor type</label>
+                        <select id="monitor-type" @bind="_draft.Type" @bind:after="TypeChanged">
+                            @foreach (var type in MonitorRules.Types)
+                            {
+                                <option value="@type">@MonitorText.TypeLabel(type)</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="monitor-kind">Event type</label>
+                        <select id="monitor-kind" @bind="_draft.Kind">
+                            @foreach (var kind in KindOptions)
+                            {
+                                <option value="@kind">@EventKinds.LabelFor(kind)</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="monitor-target">Target alias</label>
+                        <input id="monitor-target" maxlength="64" autocomplete="off" placeholder="Every alias" list="monitor-startup-names"
+                               aria-describedby="monitor-target-hint" @bind="_draft.Target" />
+                        <small id="monitor-target-hint" class="field-hint">Empty watches every approved alias of the event type.</small>
+                        <datalist id="monitor-startup-names">
+                            @if (_draft.Kind == "startup")
+                            {
+                                @foreach (var name in MonitorRules.StartupNames)
+                                {
+                                    <option value="@name"></option>
+                                }
+                            }
+                        </datalist>
+                    </div>
+                    <div class="field">
+                        <label for="monitor-severity">Severity</label>
+                        <select id="monitor-severity" @bind="_draft.Severity">
+                            @foreach (var severity in MonitorRules.Severities)
+                            {
+                                <option value="@severity">@Presentation.Title(severity)</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="field check-field">
+                        <input id="monitor-enabled" type="checkbox" @bind="_draft.Enabled" />
+                        <label for="monitor-enabled">Evaluate after approval</label>
+                    </div>
+                </div>
+            </fieldset>
+            <fieldset>
+                <legend>Evaluation</legend>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="monitor-window">Window (minutes)</label>
+                        <input id="monitor-window" type="number" min="1" max="1440" required @bind="_draft.WindowMinutes" />
+                    </div>
+                    <div class="field">
+                        <label for="monitor-delay">Evaluation delay (minutes)</label>
+                        <input id="monitor-delay" type="number" min="0" max="60" required aria-describedby="monitor-delay-hint" @bind="_draft.EvaluationDelayMinutes" />
+                        <small id="monitor-delay-hint" class="field-hint">Leaves time for late telemetry.</small>
+                    </div>
+                    <div class="field">
+                        <label for="monitor-samples">Minimum samples</label>
+                        <input id="monitor-samples" type="number" min="1" max="100000" required @bind="_draft.MinimumSamples" />
+                    </div>
+                    <div class="field">
+                        <label for="monitor-recovery-windows">Recovery windows</label>
+                        <input id="monitor-recovery-windows" type="number" min="1" max="12" required aria-describedby="monitor-recovery-windows-hint" @bind="_draft.RecoveryWindows" />
+                        <small id="monitor-recovery-windows-hint" class="field-hint">Consecutive healthy windows before recovery.</small>
+                    </div>
+                    <div class="field">
+                        <label for="monitor-cooldown">Cooldown (minutes)</label>
+                        <input id="monitor-cooldown" type="number" min="0" max="1440" required @bind="_draft.CooldownMinutes" />
+                    </div>
+                </div>
+            </fieldset>
+            <fieldset>
+                <legend>@MonitorText.TypeLabel(_draft.Type) threshold</legend>
+                <div class="form-grid">
+                    @if (_draft.Type is "latency" or "regression")
+                    {
+                        <div class="field">
+                            <label for="monitor-percentile">Percentile</label>
+                            <select id="monitor-percentile" @bind="_draft.Percentile">
+                                @foreach (var percentile in MonitorRules.Percentiles)
+                                {
+                                    <option value="@percentile">P@(percentile)</option>
+                                }
+                            </select>
+                        </div>
+                    }
+                    @if (_draft.Type == "latency")
+                    {
+                        <div class="field">
+                            <label for="monitor-threshold">Threshold (ms)</label>
+                            <input id="monitor-threshold" type="number" min="1" max="86400000" step="any" required
+                                   aria-describedby="monitor-threshold-hint" @bind="_draft.ThresholdMs" />
+                            <small id="monitor-threshold-hint" class="field-hint">Between 1 ms and 24 hours.</small>
+                        </div>
+                        <div class="field">
+                            <label for="monitor-recovery-ms">Recover below (ms)</label>
+                            <input id="monitor-recovery-ms" type="number" min="0" step="any" aria-describedby="monitor-recovery-ms-hint" @bind="_draft.RecoveryMs" />
+                            <small id="monitor-recovery-ms-hint" class="field-hint">Optional. Defaults to 80% of the threshold.</small>
+                        </div>
+                        <div class="field">
+                            <label for="monitor-baseline-days">Baseline (days)</label>
+                            <input id="monitor-baseline-days" type="number" min="0" max="30" required aria-describedby="monitor-baseline-days-hint" @bind="_draft.BaselineDays" />
+                            <small id="monitor-baseline-days-hint" class="field-hint">0 turns off the historical baseline.</small>
+                        </div>
+                        <div class="field">
+                            <label for="monitor-baseline-ratio">Baseline ratio</label>
+                            <input id="monitor-baseline-ratio" type="number" min="1.05" max="20" step="any" disabled="@(_draft.BaselineDays == 0)"
+                                   aria-describedby="monitor-baseline-ratio-hint" @bind="_draft.BaselineRatio" />
+                            <small id="monitor-baseline-ratio-hint" class="field-hint">Multiple of the baseline, 1.05 to 20.</small>
+                        </div>
+                    }
+                    else if (_draft.Type == "no-data")
+                    {
+                        <div class="field">
+                            <label for="monitor-nodata">Silence threshold (minutes)</label>
+                            <input id="monitor-nodata" type="number" min="0" max="10080" required aria-describedby="monitor-nodata-hint" @bind="_draft.NoDataMinutes" />
+                            <small id="monitor-nodata-hint" class="field-hint">0 uses twice the window. At most 7 days.</small>
+                        </div>
+                    }
+                    else if (_draft.Type == "regression")
+                    {
+                        <div class="field">
+                            <label for="monitor-failure-increase">Failure increase (points)</label>
+                            <input id="monitor-failure-increase" type="number" min="0.1" max="100" step="any" required
+                                   aria-describedby="monitor-failure-increase-hint" @bind="_draft.FailureIncreasePercent" />
+                            <small id="monitor-failure-increase-hint" class="field-hint">Failure-rate percentage points over the previous release.</small>
+                        </div>
+                        <div class="field">
+                            <label for="monitor-latency-ratio">Latency increase ratio</label>
+                            <input id="monitor-latency-ratio" type="number" min="0" max="20" step="any" required
+                                   aria-describedby="monitor-latency-ratio-hint" @bind="_draft.LatencyIncreaseRatio" />
+                            <small id="monitor-latency-ratio-hint" class="field-hint">1.05 to 20, or 0 to compare failures only.</small>
+                        </div>
+                        <div class="field">
+                            <label for="monitor-min-latency">Minimum latency increase (ms)</label>
+                            <input id="monitor-min-latency" type="number" min="0" max="3600000" step="any" required @bind="_draft.MinimumLatencyIncreaseMs" />
+                        </div>
+                        <div class="field">
+                            <label for="monitor-comparison">Comparison (hours)</label>
+                            <input id="monitor-comparison" type="number" min="1" max="168" required aria-describedby="monitor-comparison-hint" @bind="_draft.ComparisonHours" />
+                            <small id="monitor-comparison-hint" class="field-hint">Telemetry compared on each side of a release.</small>
+                        </div>
+                    }
+                </div>
+            </fieldset>
+            <div class="field">
+                <label for="monitor-reason">Reason for the reviewer</label>
+                <textarea id="monitor-reason" maxlength="500" rows="3" required placeholder="Why this monitor is needed and how the threshold was chosen"
+                          @bind="_reason" @bind:event="oninput"></textarea>
+            </div>
+            @if (_error is not null)
+            {
+                <p class="text-danger" role="alert">@_error</p>
+            }
+            @if (_notice is not null)
+            {
+                <p class="text-good" role="status">@_notice</p>
+            }
+            <div class="form-actions">
+                <button class="button primary" type="submit" disabled="@_submitting">@(_submitting ? "Submitting…" : "Submit proposal")</button>
+                <button class="button" type="button" @onclick="Clear">Clear form</button>
+            </div>
+        </form>
+    }
+</section>
+
+@code {
+    private readonly CancellationTokenSource _lifetime = new();
+    private MonitorDefinition _draft = new();
+    private MonitorDefinition? _source;
+    private ElementReference _nameInput;
+    private string _reason = "";
+    private string? _error;
+    private string? _notice;
+    private bool _submitting;
+    private bool _editing;
+    private bool _focusName;
+
+    [CascadingParameter] public PortalContext Context { get; set; } = null!;
+    /// <summary>An existing definition to edit. A new instance reloads the form.</summary>
+    [Parameter] public MonitorDefinition? Source { get; set; }
+    [Parameter] public EventCallback<string> Proposed { get; set; }
+
+    private IEnumerable<ScopeEntry> Scopes => Context.Scopes.OrderBy(scope => scope.Label).ThenBy(scope => scope.Environment);
+    private string ScopeKey => _draft.Application + "|" + _draft.Environment;
+    private string[] KindOptions => _draft.Type == "no-data" ? MonitorRules.Kinds : MonitorRules.DurationKinds;
+
+    protected override void OnInitialized() => _draft = NewDraft();
+
+    protected override void OnParametersSet()
+    {
+        if (ReferenceEquals(Source, _source))
+            return;
+        _source = Source;
+        if (Source is null)
+            return;
+        _draft = Source with { };
+        _editing = true;
+        _focusName = Context.Scopes.Length > 0;
+        _error = null;
+        _notice = null;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_focusName)
+        {
+            _focusName = false;
+            await _nameInput.FocusAsync();
+        }
+    }
+
+    private MonitorDefinition NewDraft()
+    {
+        var scope = Scopes.FirstOrDefault();
+        return new() { Application = scope?.Application ?? "", Environment = scope?.Environment ?? "", ThresholdMs = 1000 };
+    }
+
+    private void Clear()
+    {
+        _draft = NewDraft();
+        _reason = "";
+        _editing = false;
+        _error = null;
+        _notice = null;
+    }
+
+    private void ChangeScope(ChangeEventArgs args)
+    {
+        var parts = (args.Value?.ToString() ?? "").Split('|', 2);
+        if (parts.Length == 2)
+            (_draft.Application, _draft.Environment) = (parts[0], parts[1]);
+    }
+
+    private void TypeChanged()
+    {
+        if (!KindOptions.Contains(_draft.Kind))
+            _draft.Kind = "api";
+        if (_draft.Type == "latency" && _draft.ThresholdMs < 1)
+            _draft.ThresholdMs = 1000;
+    }
+
+    private async Task SubmitAsync()
+    {
+        if (_submitting)
+            return;
+        _notice = null;
+        var monitor = _draft with { Name = _draft.Name.Trim(), Target = _draft.Target.Trim() };
+        _error = MonitorRules.Validate(monitor, Context.Scopes) ?? MonitorRules.ReasonProblem(_reason);
+        if (_error is not null)
+            return;
+
+        _submitting = true;
+        try
+        {
+            var id = await Api.ProposeChangeAsync(new ChangeProposal("monitor", "upsert", Monitor: monitor, Reason: _reason.Trim()),
+                Context.CsrfToken, _lifetime.Token);
+            _reason = "";
+            _notice = "Proposal submitted for review" + (id.Length > 0 ? $" as change {Presentation.Id(id)}" : "") + ". It takes effect after approval.";
+            await Proposed.InvokeAsync(_notice);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (PortalRequestException exception) { _error = exception.Message; }
+        catch (Exception) { _error = "Could not submit the proposal. Check your connection and retry."; }
+        finally { _submitting = false; }
+    }
+
+    public void Dispose()
+    {
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+}

@@ -1,0 +1,39 @@
+@if (Error is not null)
+{
+    <div class="state-box state-error" role="alert">
+        <span class="state-icon"><Icon Name="incidents" Size="22" /></span>
+        <div><strong>Couldn’t load data</strong><p>@Error</p></div>
+        @if (SignIn)
+        {
+            <a class="button primary" href="auth/login">Sign in</a>
+        }
+        else
+        {
+            <button type="button" class="button" @onclick="Retry">Retry</button>
+        }
+    </div>
+}
+else if (Loading)
+{
+    <div class="state-box" role="status" aria-live="polite">
+        <span class="loading-ring" aria-hidden="true"></span>
+        <div><strong>Loading data…</strong><p>Querying the selected scope.</p></div>
+    </div>
+}
+else
+{
+    <div class="state-box">
+        <span class="state-icon"><Icon Name="@IconName" Size="22" /></span>
+        <div><strong>@EmptyTitle</strong><p>@EmptyText</p></div>
+    </div>
+}
+
+@code {
+    [Parameter] public string? Error { get; set; }
+    [Parameter] public bool Loading { get; set; }
+    [Parameter] public bool SignIn { get; set; }
+    [Parameter] public string EmptyTitle { get; set; } = "No matching data";
+    [Parameter] public string EmptyText { get; set; } = "Choose a wider time range or a different scope.";
+    [Parameter] public string IconName { get; set; } = "archive";
+    [Parameter] public EventCallback Retry { get; set; }
+}

@@ -1,0 +1,86 @@
+@page "/metrics"
+@inherits ScopedPage
+
+<PageTitle>Metrics · PulseOps</PageTitle>
+<PageHeader Title="Metrics explorer"  />
+<ScopeBar Scope="Scope" Updating="Loading" Refresh="RefreshAsync" Extra="Filters" />
+<form class="search-filters" @onsubmit="Search" @onsubmit:preventDefault>
+    <label>Metric
+        <select @bind="_metric">
+            <option value="requests">API request count</option>
+            <option value="errors">API error rate</option>
+            <option value="latency">P95 API latency</option>
+            <option value="browser">Browser metric samples</option>
+        </select>
+    </label>
+    @if (_metric == "browser")
+    {
+        <label>Metric alias <input type="search" maxlength="100" placeholder="Optional exact alias" @bind="_name" /></label>
+    }
+    <button class="button primary" type="submit">Apply</button>
+</form>
+
+@if (Error is not null || UpdatedAt is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else if (Metric == "browser")
+{
+    <section class="panel">
+        <div class="panel-head"><div><h2>Browser metric events</h2><p>Only values reported by monitored browsers are shown.</p></div></div>
+        @if (_events.Length == 0) { <DataState IconName="metrics" EmptyTitle="No browser metric samples" /> }
+        else { <EventTable Events="_events" Scope="Scope" /> }
+        <Pager Count="_events.Length" Offset="Skip" Link="PageLink" />
+    </section>
+}
+else
+{
+    <section class="panel chart-card wide-chart">
+        <div class="panel-head"><div><h2>@ChartTitle</h2><p>Aggregated per time bucket. Times shown in UTC.</p></div></div>
+        <TimeSeries Label="@ChartTitle" Times="_times" Series="_series" Unit="@ChartUnit" />
+    </section>
+}
+
+@code {
+    [SupplyParameterFromQuery] public string? Metric { get; set; }
+    [SupplyParameterFromQuery] public string? Name { get; set; }
+    private string _metric = "requests";
+    private string? _name;
+    private DateTimeOffset[] _times = [];
+    private ChartSeries[] _series = [];
+    private TelemetryEvent[] _events = [];
+    private (string, string?)[] Filters => [("metric", Metric), ("name", Name)];
+    private string ChartTitle => Metric == "latency" ? "P95 API latency" : Metric == "errors" ? "API error rate" : "API request count";
+    private string ChartUnit => Metric == "latency" ? "ms" : Metric == "errors" ? "%" : "";
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        _metric = Metric is "browser" or "latency" or "errors" ? Metric : "requests";
+        _name = Name;
+        if (Metric == "browser")
+        {
+            var events = await Api.GetAsync<TelemetryEvent[]>(Scope.Url("events", ("kind", "metric"), ("name", Name),
+                ("limit", "50"), ("offset", Skip.ToString(CultureInfo.InvariantCulture))), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            _events = events;
+        }
+        else
+        {
+            var overview = await Api.GetAsync<Overview>(Scope.Url("overview"), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var points = overview.Points.OrderBy(point => point.At).ToArray();
+            _times = points.Select(point => point.At).ToArray();
+            var values = Metric switch
+            {
+                "latency" => points.Select(point => point.P95),
+                "errors" => points.Select(point => point.Requests == 0 ? (double?)null : 100d * point.Failures / point.Requests),
+                _ => points.Select(point => (double?)point.Requests)
+            };
+            var color = Metric == "latency" ? "var(--series-gold)" : Metric == "errors" ? "var(--series-rust)" : "var(--series-forest)";
+            _series = [new(ChartTitle, color, values.ToArray(), Columns: _metric == "requests")];
+        }
+    }
+
+    private void Search() => Navigation.NavigateTo(Scope.Url("metrics", ("metric", _metric), ("name", _metric == "browser" ? _name?.Trim() : null)));
+    private string PageLink(int offset) => Scope.Url("metrics", Filters.Append(("offset", offset.ToString(CultureInfo.InvariantCulture))).ToArray());
+}

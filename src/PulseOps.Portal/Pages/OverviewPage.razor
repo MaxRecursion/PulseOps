@@ -1,0 +1,129 @@
+@page "/"
+@inherits ScopedPage
+
+<PageTitle>Overview · PulseOps</PageTitle>
+<PageHeader Title="Operations overview">
+    <Actions>
+        @if (UpdatedAt is DateTimeOffset updated)
+        {
+            <time class="overview-updated" datetime="@updated.ToString("O")">
+                Updated @updated.UtcDateTime.ToString("HH:mm", CultureInfo.InvariantCulture) UTC
+            </time>
+        }
+    </Actions>
+</PageHeader>
+<ScopeBar Scope="Scope" Updating="Loading" Refresh="RefreshAsync" />
+
+@if (Error is not null || UpdatedAt is null || _data is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else
+{
+    <div class="operations-report">
+        <dl class="reliability-readings" aria-label="Key reliability metrics">
+            <div>
+                <dt>API requests</dt>
+                <dd>@Presentation.Count(_data.Requests)</dd>
+                <dd class="reading-detail">@Presentation.Count(_data.FailedRequests) failed</dd>
+            </div>
+            <div>
+                <dt>Success rate</dt>
+                <dd>@Presentation.Percent(_data.SuccessfulRequests, _data.Requests)</dd>
+                <dd class="reading-detail">@Presentation.Count(_data.SuccessfulRequests) successful</dd>
+            </div>
+            <div>
+                <dt>P95 latency</dt>
+                <dd>@Presentation.Duration(_data.P95)</dd>
+                <dd class="reading-detail">P50 @Presentation.Duration(_data.P50) · P99 @Presentation.Duration(_data.P99)</dd>
+            </div>
+            <div>
+                <dt>Open incidents</dt>
+                <dd>@Presentation.Count(_data.OpenIncidents)</dd>
+                <dd class="reading-detail"><a class="report-link" href="@Scope.Url("incidents")">Review incidents</a></dd>
+            </div>
+        </dl>
+
+        <div class="performance-plots">
+            <section aria-labelledby="traffic-title">
+                <header class="report-heading">
+                    <h2 id="traffic-title">Request volume</h2>
+                    <a class="report-link" href="@Scope.Url("dependencies")">API explorer</a>
+                </header>
+                <TimeSeries Label="Total requests and failures over time" Times="_times" Series="_requestSeries" />
+            </section>
+            <section aria-labelledby="latency-title">
+                <header class="report-heading">
+                    <h2 id="latency-title">Response latency</h2>
+                    <a class="report-link" href="@Scope.Url("metrics", ("metric", "latency"))">Metrics</a>
+                </header>
+                <TimeSeries Label="95th percentile API latency over time" Times="_times" Series="_latencySeries" Unit="ms" />
+            </section>
+        </div>
+
+        <div class="scope-records">
+            <section aria-labelledby="app-title">
+                <header class="report-heading">
+                    <h2 id="app-title">Application health</h2>
+                    <a class="report-link" href="@Scope.Url("applications")">Applications</a>
+                </header>
+                <ServiceTable Services="_data.Services" Scope="Scope" />
+            </section>
+            <section aria-labelledby="incidents-title">
+                <header class="report-heading">
+                    <h2 id="incidents-title">Recent incidents</h2>
+                    <a class="report-link" href="@Scope.Url("incidents")">All incidents</a>
+                </header>
+                @if (_data.Incidents.Length == 0)
+                {
+                    <DataState IconName="check" EmptyTitle="No incidents in scope" EmptyText="New detections will appear here." />
+                }
+                else
+                {
+                    <ul class="incident-index">
+                        @foreach (var incident in _data.Incidents.Take(4))
+                        {
+                            <li>
+                                <a href="@Scope.For(incident.Application, incident.Environment).Url($"incidents/{incident.Id}")">
+                                    <span class="record-summary">
+                                        <strong>@incident.Title</strong>
+                                        <small>@AppLabel(incident.Application) · @Presentation.ShortDate(incident.LastSeen) UTC</small>
+                                    </span>
+                                    <span class="record-status text-@Presentation.Tone(incident.Status)">@incident.Status</span>
+                                </a>
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
+        </div>
+        <section class="browser-readings" aria-label="Browser telemetry">
+            <a href="@Scope.Url("sessions")"><strong>@Presentation.Count(_data.Sessions)</strong> observed sessions</a>
+            <a href="@Scope.Url("exceptions")"><strong>@Presentation.Count(_data.Exceptions)</strong> exception events</a>
+            <a href="@Scope.Url("logs", ("kind", "startup"))"><strong>@Presentation.Count(_data.StartupFailures)</strong> startup failures</a>
+        </section>
+    </div>
+}
+
+@code {
+    private Overview? _data;
+    private DateTimeOffset[] _times = [];
+    private ChartSeries[] _requestSeries = [];
+    private ChartSeries[] _latencySeries = [];
+    protected override bool LiveRefresh => true;
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        var data = await Api.GetAsync<Overview>(Scope.Url("overview"), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        _data = data;
+        var points = data.Points.OrderBy(point => point.At).ToArray();
+        _times = points.Select(point => point.At).ToArray();
+        _requestSeries =
+        [
+            new("All requests", "var(--series-forest)", points.Select(point => (double?)point.Requests).ToArray(), Columns: true),
+            new("Failures", "var(--series-rust)", points.Select(point => (double?)point.Failures).ToArray(), Dashed: true)
+        ];
+        _latencySeries = [new("P95 latency", "var(--series-gold)", points.Select(point => point.P95).ToArray())];
+    }
+}

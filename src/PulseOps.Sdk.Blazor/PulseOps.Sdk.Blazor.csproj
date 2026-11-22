@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <PackageId>PulseOps.Sdk.Blazor</PackageId>
+    <Description>Privacy-oriented browser instrumentation for self-hosted PulseOps.</Description>
+    <PackageReadmeFile>SDK.md</PackageReadmeFile>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" />
+    <None Include="../../docs/SDK.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+</Project>

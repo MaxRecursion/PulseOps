@@ -1,0 +1,128 @@
+@implements IDisposable
+@inject PortalApi Api
+
+<section class="panel" aria-labelledby="managed-monitors-title">
+    <div class="panel-head">
+        <div>
+            <h2 id="managed-monitors-title">Monitors managed in Change control</h2>
+            <p>Created by approved proposals. Monitors from the configuration file are changed through a configuration release instead.</p>
+        </div>
+    </div>
+    @if (Monitors.Count == 0)
+    {
+        <DataState IconName="monitors" EmptyTitle="No monitors managed here yet" EmptyText="Approved monitor proposals appear here and can then be updated or deleted." />
+    }
+    else
+    {
+        <div class="table-scroll">
+            <table class="data-table">
+                <thead><tr>
+                    <th scope="col">Monitor</th><th scope="col">Type</th><th scope="col">Threshold</th>
+                    <th scope="col" class="numeric">Revision</th><th scope="col">State</th><th scope="col">Action</th>
+                </tr></thead>
+                <tbody>
+                    @foreach (var monitor in Monitors)
+                    {
+                        <tr>
+                            <td><strong class="table-main">@monitor.Name</strong><small class="table-secondary">@ScopeLabel(monitor.Application, monitor.Environment)</small></td>
+                            <td>@MonitorText.TypeLabel(monitor.Type)<small class="table-secondary">@MonitorText.Target(monitor.Kind, monitor.Target)</small></td>
+                            <td class="rule-text">@MonitorText.Threshold(monitor.Definition)</td>
+                            <td class="numeric">@monitor.Revision</td>
+                            <td><Badge Text="@MonitorText.StateLabel(monitor.State)" Tone="@MonitorText.StateTone(monitor.State)" Dot="true" /></td>
+                            <td>
+                                @if (monitor.Definition is { } definition)
+                                {
+                                    <button type="button" class="button" @onclick="() => Edit.InvokeAsync(definition with { })">
+                                        Edit<span class="sr-only">@($" {monitor.Name}")</span>
+                                    </button>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <form class="detail-form deletion-form" @onsubmit="ProposeDeletionAsync" @onsubmit:preventDefault aria-labelledby="delete-monitor-title">
+            <h3 id="delete-monitor-title">Propose a deletion</h3>
+            <div class="field">
+                <label for="delete-monitor">Monitor</label>
+                <select id="delete-monitor" @bind="_selected">
+                    @foreach (var monitor in Monitors)
+                    {
+                        <option value="@Key(monitor)">@monitor.Name · @ScopeLabel(monitor.Application, monitor.Environment)</option>
+                    }
+                </select>
+            </div>
+            <div class="field">
+                <label for="delete-reason">Reason for the reviewer</label>
+                <textarea id="delete-reason" maxlength="500" rows="2" required @bind="_reason" @bind:event="oninput"></textarea>
+            </div>
+            @if (_error is not null)
+            {
+                <p class="text-danger" role="alert">@_error</p>
+            }
+            @if (_notice is not null)
+            {
+                <p class="text-good" role="status">@_notice</p>
+            }
+            <button class="button danger" type="submit" disabled="@_submitting">@(_submitting ? "Submitting…" : "Propose deletion")</button>
+        </form>
+    }
+</section>
+
+@code {
+    private readonly CancellationTokenSource _lifetime = new();
+    private string _selected = "";
+    private string _reason = "";
+    private string? _error;
+    private string? _notice;
+    private bool _submitting;
+
+    [CascadingParameter] public PortalContext Context { get; set; } = null!;
+    /// <summary>Monitors whose source is "administration".</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<MonitorStatus> Monitors { get; set; } = [];
+    [Parameter] public EventCallback<MonitorDefinition> Edit { get; set; }
+    [Parameter] public EventCallback<string> Proposed { get; set; }
+
+    protected override void OnParametersSet()
+    {
+        if (!Monitors.Any(monitor => Key(monitor) == _selected))
+            _selected = Monitors.Count > 0 ? Key(Monitors[0]) : "";
+    }
+
+    private static string Key(MonitorStatus monitor) => monitor.Application + "|" + monitor.Environment + "|" + monitor.Name;
+
+    private async Task ProposeDeletionAsync()
+    {
+        if (_submitting)
+            return;
+        _notice = null;
+        var monitor = Monitors.FirstOrDefault(item => Key(item) == _selected);
+        _error = monitor is null ? "Choose a monitor to delete." : MonitorRules.ReasonProblem(_reason);
+        if (_error is not null || monitor is null)
+            return;
+
+        _submitting = true;
+        try
+        {
+            await Api.ProposeChangeAsync(new ChangeProposal("monitor", "delete", Application: monitor.Application,
+                Environment: monitor.Environment, Target: monitor.Name, Reason: _reason.Trim()), Context.CsrfToken, _lifetime.Token);
+            _reason = "";
+            _notice = $"Deletion of {monitor.Name} proposed. The monitor keeps running until the change is approved.";
+            await Proposed.InvokeAsync(_notice);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (PortalRequestException exception) { _error = exception.Message; }
+        catch (Exception) { _error = "Could not submit the proposal. Check your connection and retry."; }
+        finally { _submitting = false; }
+    }
+
+    private string ScopeLabel(string application, string environment) =>
+        $"{Context.Scopes.FirstOrDefault(scope => scope.Application == application)?.Label ?? application} · {Presentation.Title(environment)}";
+
+    public void Dispose()
+    {
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+}

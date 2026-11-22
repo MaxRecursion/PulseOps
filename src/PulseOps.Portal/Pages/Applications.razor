@@ -1,0 +1,38 @@
+@page "/applications"
+@inherits ScopedPage
+
+<PageTitle>Applications · PulseOps</PageTitle>
+<PageHeader Title="Applications" Description="Compare observed reliability across registered applications and environments." Section="Workspace" />
+<ScopeBar Scope="Scope" Updating="Loading" Refresh="RefreshAsync" />
+@if (Error is not null || UpdatedAt is null || _data is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else
+{
+    <section class="panel">
+        <div class="panel-head"><div><h2>Registered scopes</h2><p>Open an application to view its scoped dashboard.</p></div></div>
+        <ServiceTable Services="_services" Scope="Scope" />
+    </section>
+}
+
+@code {
+    private Overview? _data;
+    private ServiceSummary[] _services = [];
+    protected override bool LiveRefresh => true;
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        var data = await Api.GetAsync<Overview>(Scope.Url("overview"), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        _data = data;
+        var summaries = data.Services.ToDictionary(scope => (scope.Application, scope.Environment));
+        _services = Context.Scopes.Where(scope =>
+            (Scope.Application is null || Scope.Application == scope.Application) &&
+            (Scope.Environment is null || Scope.Environment == scope.Environment))
+            .OrderBy(scope => scope.Label)
+            .ThenBy(scope => scope.Environment)
+            .Select(scope => summaries.GetValueOrDefault((scope.Application, scope.Environment)) ??
+                new ServiceSummary(scope.Application, scope.Environment, scope.Label, 0, 0, null, 0)).ToArray();
+    }
+}

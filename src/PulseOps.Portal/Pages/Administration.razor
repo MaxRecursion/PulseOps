@@ -1,0 +1,127 @@
+@page "/administration"
+@inherits ScopedPage
+
+<PageTitle>Change control · PulseOps</PageTitle>
+<PageHeader Title="Change control" Section="Administration"
+            Description="Propose, review and audit monitor and maintenance changes. Every proposal and decision is recorded in the hash-chained audit log.">
+    <Actions>
+        @if (HasAccess)
+        {
+            <button type="button" class="button" @onclick="RefreshAsync" disabled="@Loading"><Icon Name="refresh" /> Refresh</button>
+        }
+    </Actions>
+</PageHeader>
+
+@if (!HasAccess)
+{
+    <section class="panel">
+        <div class="panel-head"><div><h2>Change control is not available for your role</h2><p>Access is decided by your organisation’s role assignments.</p></div></div>
+        <p class="panel-copy">
+            Proposing changes requires the Platform administrator or Application owner role. Reviewing the audit log requires the
+            Platform administrator or Read-only auditor role. You can follow monitor status on the
+            <a href="@Scope.Url("monitors")">Monitors</a> page.
+        </p>
+    </section>
+}
+else if (!_loaded)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else
+{
+    @if (Error is not null)
+    {
+        <div class="state-box state-error page-alert" role="alert">
+            <span class="state-icon"><Icon Name="incidents" Size="22" /></span>
+            <div><strong>Couldn’t refresh change control</strong><p>@Error Showing the last loaded data.</p></div>
+            <button type="button" class="button" @onclick="RefreshAsync">Retry</button>
+        </div>
+    }
+    <ChangeReview Changes="_pending" Changed="ReloadAsync" />
+    @if (Context.CanPropose)
+    {
+        <MonitorProposalForm Source="_editSource" Proposed="ReloadAsync" />
+        <ManagedMonitors Monitors="_managed" Edit="EditMonitor" Proposed="ReloadAsync" />
+    }
+    <MaintenancePanel Windows="_maintenance" Proposed="ReloadAsync" />
+    <section class="panel" aria-labelledby="recent-changes-title">
+        <div class="panel-head"><div><h2 id="recent-changes-title">Recent decisions</h2><p>The latest decided, withdrawn or expired proposals in your scopes.</p></div></div>
+        @if (_recent.Length == 0)
+        {
+            <DataState IconName="clock" EmptyTitle="No decided changes yet" EmptyText="Approved, rejected, withdrawn and expired proposals appear here." />
+        }
+        else
+        {
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead><tr>
+                        <th scope="col">Change</th><th scope="col">Status</th><th scope="col">Proposed by</th>
+                        <th scope="col">Decided (UTC)</th><th scope="col">Decided by</th><th scope="col">Note</th>
+                    </tr></thead>
+                    <tbody>
+                        @foreach (var change in _recent)
+                        {
+                            <tr>
+                                <td><strong class="table-main">@ChangeText.Title(change)</strong><small class="table-secondary">@ScopeLabel(change)</small></td>
+                                <td><Badge Text="@change.Status" Tone="@ChangeText.StatusTone(change.Status)" /></td>
+                                <td class="mono">@change.Proposer</td>
+                                <td>@(change.DecidedAt is { } decided ? Presentation.Date(decided) : "—")</td>
+                                <td class="mono">@(change.Decider ?? "—")</td>
+                                <td class="wrap-cell">@(string.IsNullOrWhiteSpace(change.DecisionNote) ? "—" : change.DecisionNote)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+    @if (Context.CanAudit && _audit is not null)
+    {
+        <AuditLog Result="_audit" Offset="Skip" Link="AuditLink" />
+    }
+}
+
+@code {
+    private ConfigChange[] _pending = [];
+    private ConfigChange[] _recent = [];
+    private MaintenanceWindow[] _maintenance = [];
+    private MonitorStatus[] _managed = [];
+    private AuditResult? _audit;
+    private MonitorDefinition? _editSource;
+    private bool _loaded;
+
+    private bool HasAccess => Context.CanPropose || Context.CanAdminister || Context.CanAudit;
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        if (!HasAccess)
+            return;
+
+        // Sequential on purpose: the query rate limiter admits only a few concurrent requests.
+        var pending = await Api.GetAsync("admin/changes?status=pending&limit=50&offset=0", AdminJson.Default.ConfigChangeArray, cancellationToken);
+        var recent = await Api.GetAsync("admin/changes?status=all&limit=20&offset=0", AdminJson.Default.ConfigChangeArray, cancellationToken);
+        var maintenance = await Api.GetAsync("admin/maintenance?includeEnded=false", AdminJson.Default.MaintenanceWindowArray, cancellationToken);
+        MonitorStatus[] monitors = Context.CanPropose
+            ? await Api.GetAsync("monitors", AdminJson.Default.MonitorStatusArray, cancellationToken) : [];
+        var audit = Context.CanAudit
+            ? await Api.GetAsync(PortalApi.Query("admin/audit", ("limit", AuditLog.PageSize.ToString(CultureInfo.InvariantCulture)),
+                ("offset", Skip.ToString(CultureInfo.InvariantCulture))), AdminJson.Default.AuditResult, cancellationToken)
+            : null;
+        cancellationToken.ThrowIfCancellationRequested();
+        _pending = pending;
+        _recent = recent.Where(change => change.Status != "Pending").ToArray();
+        _maintenance = maintenance;
+        _managed = monitors.Where(monitor => monitor.Source == "administration").ToArray();
+        _audit = audit;
+        _loaded = true;
+    }
+
+    private Task ReloadAsync(string _) => RefreshAsync();
+
+    private void EditMonitor(MonitorDefinition definition) => _editSource = definition;
+
+    private string AuditLink(int offset) => Scope.Url("administration", ("offset", offset.ToString(CultureInfo.InvariantCulture)));
+
+    private string ScopeLabel(ConfigChange change) => change.Application.Length == 0 ? "Platform"
+        : $"{AppLabel(change.Application)} · {Presentation.Title(change.Environment)}";
+}

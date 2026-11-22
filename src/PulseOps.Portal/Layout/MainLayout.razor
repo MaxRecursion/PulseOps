@@ -1,0 +1,298 @@
+@inherits LayoutComponentBase
+@implements IDisposable
+@inject NavigationManager Navigation
+@inject PortalApi Api
+@inject LiveUpdates Live
+@inject IJSRuntime JS
+
+<div class="app-shell" inert="@(_searchOpen ? "" : null)">
+    <a href="#main-content" class="skip-link">Skip to content</a>
+    @if (_menuOpen)
+    {
+        <button class="mobile-overlay" type="button" aria-label="Close navigation" @onclick="ToggleMenu"></button>
+    }
+    <aside class="sidebar @(_menuOpen ? "is-open" : null)" aria-label="PulseOps sidebar">
+        <a class="brand" href="@Link("")">
+            <img src="pulse.svg" width="30" height="30" alt="" />
+            <strong>PulseOps</strong>
+        </a>
+        <nav class="sidebar-nav" aria-label="Primary navigation">
+            @foreach (var group in VisibleLinks.GroupBy(entry => entry.Group))
+            {
+                <div class="nav-section">
+                    <p>@group.Key</p>
+                    @foreach (var entry in group)
+                    {
+                        <a href="@Link(entry.Path)" class="nav-link @(IsActive(entry.Path) ? "active" : null)"
+                           aria-current="@(IsActive(entry.Path) ? "page" : null)">
+                            <Icon Name="@entry.Icon" Size="17" />
+                            <span>@entry.Label</span>
+                        </a>
+                    }
+                </div>
+            }
+        </nav>
+        @if (_context is not null)
+        {
+            <div class="account">
+                <div class="avatar" aria-hidden="true">@Initials</div>
+                <div class="account-identity">
+                    <strong title="@_context.Name">@_context.Name</strong>
+                    <span title="@_context.Role">@RoleLabel(_context.Role)</span>
+                </div>
+                @if (!_context.Development)
+                {
+                    <form action="auth/logout" method="post">
+                        <input type="hidden" name="__RequestVerificationToken" value="@_context.CsrfToken" />
+                        <button class="account-button" type="submit" title="Sign out" aria-label="Sign out">
+                            <Icon Name="deployments" Size="16" />
+                        </button>
+                    </form>
+                }
+            </div>
+        }
+    </aside>
+    <div class="work-area">
+        <header class="topbar">
+            <div class="breadcrumbs">
+                <button class="button icon-button mobile-menu" type="button" title="Navigation" aria-label="Toggle navigation"
+                        aria-expanded="@_menuOpen" @onclick="ToggleMenu"><Icon Name="menu" Size="20" /></button>
+                <span class="crumb-root">@(VisibleLinks.FirstOrDefault(entry => IsActive(entry.Path))?.Group ?? "PulseOps")</span>
+                <Icon Name="chevron" Size="13" />
+                <strong>@CurrentPage</strong>
+            </div>
+            <div class="topbar-actions">
+                @if (_context is not null)
+                {
+                    @if (_context.Development || _context.Scopes.Any(scope => scope.Demo))
+                    {
+                        <span class="environment-notice" role="note" title="Demo applications contain simulated telemetry">
+                            @(_context.Scopes.Any(scope => scope.Demo) ? "Demo data" : "Development")
+                        </span>
+                    }
+                    <span class="connection-status" title="@(Live.Connected ? "SignalR connected" : "Live connection unavailable. Supported pages refresh every 30 seconds.")">
+                        <span class="connection-dot @(Live.Connected ? "online" : null)"></span>
+                        @(Live.Connected ? "Live feed" : "Polling")
+                    </span>
+                }
+                <button class="button icon-button" type="button" title="Find a page" aria-label="Find a page" @ref="_searchTrigger" @onclick="OpenSearch">
+                    <Icon Name="search" Size="18" />
+                </button>
+                <button class="button icon-button" type="button" title="Switch color theme" aria-label="Switch color theme" @onclick="ToggleThemeAsync">
+                    <Icon Name="moon" Class="theme-moon" Size="18" />
+                    <Icon Name="sun" Class="theme-sun" Size="18" />
+                </button>
+            </div>
+        </header>
+        <main id="main-content" class="page">
+            @if (_context is not null)
+            {
+                <CascadingValue Value="_context">
+                    @Body
+                </CascadingValue>
+            }
+            else if (_signIn)
+            {
+                <PageHeader Title="Sign in to PulseOps" Description="Use your organisation’s account to view application telemetry." />
+                <a class="button primary" href="auth/login">Continue to sign in</a>
+            }
+            else
+            {
+                <DataState Error="@_error" Loading="@(_error is null)" Retry="LoadContextAsync" />
+            }
+        </main>
+    </div>
+</div>
+
+@if (_searchOpen)
+{
+    <div class="dialog-overlay" @onclick="CloseSearch">
+        <section class="search-dialog" role="dialog" aria-modal="true" aria-label="Find a page" @onclick:stopPropagation @onkeydown="SearchKeyDown">
+            <div class="search-box">
+                <Icon Name="search" Size="20" />
+                <input type="search" @ref="_searchInput" aria-label="Search portal pages" placeholder="Find a page…" @bind="_search" @bind:event="oninput" @onkeydown="SearchInputKeyDown" />
+                <button class="button icon-button" type="button" title="Close search" aria-label="Close search" @onclick="CloseSearch"><Icon Name="close" /></button>
+            </div>
+            <div class="search-results">
+                @foreach (var entry in SearchResults)
+                {
+                    <a href="@Link(entry.Path)" @onclick="FollowSearchResult"><Icon Name="@entry.Icon" />@entry.Label</a>
+                }
+                @if (!SearchResults.Any())
+                {
+                    <p>No matching pages</p>
+                }
+            </div>
+        </section>
+    </div>
+}
+
+@code {
+    private static readonly NavEntry[] Links =
+    [
+        new("", "Overview", "overview", "Workspace"),
+        new("applications", "Applications", "apps", "Workspace"),
+        new("incidents", "Incidents", "incidents", "Workspace"),
+        new("monitors", "Monitors", "monitors", "Workspace"),
+        new("sessions", "Sessions", "sessions", "Explore"),
+        new("dependencies", "API explorer", "dependencies", "Explore"),
+        new("exceptions", "Exceptions", "exceptions", "Explore"),
+        new("logs", "Logs", "logs", "Explore"),
+        new("traces", "Traces", "traces", "Explore"),
+        new("deployments", "Deployments", "deployments", "Explore"),
+        new("metrics", "Metrics", "metrics", "Explore"),
+        new("history", "History", "history", "Explore"),
+        new("administration", "Change control", "admin", "Administration", Requirement: NavRequirement.Governance),
+        new("platform", "Platform health", "health", "Administration", Requirement: NavRequirement.Administrator)
+    ];
+
+    private PortalContext? _context;
+    private string? _error;
+    private bool _signIn;
+    private bool _menuOpen;
+    private bool _searchOpen;
+    private bool _focusSearch;
+    private bool _focusSearchTrigger;
+    private string _search = "";
+    private ElementReference _searchInput;
+    private ElementReference _searchTrigger;
+    private readonly CancellationTokenSource _lifetime = new();
+
+    private IEnumerable<NavEntry> VisibleLinks => Links.Where(link => link.Requirement switch
+    {
+        NavRequirement.Administrator => _context?.CanAdminister == true || _context?.Role == "PlatformAdministrator",
+        NavRequirement.Governance => _context is { } c && (c.CanAdminister || c.CanPropose || c.CanAudit),
+        _ => true
+    });
+    private IEnumerable<NavEntry> SearchResults => VisibleLinks.Where(link => link.Label.Contains(_search, StringComparison.OrdinalIgnoreCase));
+    private string CurrentPage => VisibleLinks.FirstOrDefault(entry => IsActive(entry.Path))?.Label ?? "Workspace";
+    private string Initials => string.Concat((_context?.Name ?? "PO").Split([' ', '.', '@'], StringSplitOptions.RemoveEmptyEntries)
+        .Take(2).Select(part => char.ToUpperInvariant(part[0])));
+
+    protected override async Task OnInitializedAsync()
+    {
+        Navigation.LocationChanged += OnLocationChanged;
+        Live.ConnectionChanged += OnConnectionChanged;
+        await LoadContextAsync();
+    }
+
+    private async Task LoadContextAsync()
+    {
+        _error = null;
+        _signIn = false;
+        try
+        {
+            _context = await Api.GetAsync<PortalContext>("context", _lifetime.Token);
+            Live.Start();
+        }
+        catch (PortalRequestException exception) when (exception.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            _signIn = true;
+        }
+        catch (PortalRequestException exception)
+        {
+            _error = exception.Message;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            _error = "Could not reach PulseOps. Check your connection and retry.";
+        }
+    }
+
+    private bool IsActive(string path)
+    {
+        var current = Navigation.ToBaseRelativePath(Navigation.Uri).Split('?', '#')[0].Trim('/');
+        return current.Equals(path, StringComparison.OrdinalIgnoreCase) ||
+            (path.Length > 0 && current.StartsWith(path + "/", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private string Link(string path)
+    {
+        var parameters = new Uri(Navigation.Uri).Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Where(parameter => parameter.Split('=', 2)[0] is "application" or "environment" or "hours" or "version");
+        var query = string.Join("&", parameters);
+        return query.Length > 0 ? (path.Length == 0 ? "./" : path) + "?" + query : path.Length == 0 ? "./" : path;
+    }
+
+    private void ToggleMenu() => _menuOpen = !_menuOpen;
+
+    private async Task ToggleThemeAsync()
+    {
+        await JS.InvokeVoidAsync("pulsePortal.toggleTheme");
+    }
+
+    private void OpenSearch()
+    {
+        _search = "";
+        _searchOpen = true;
+        _focusSearch = true;
+    }
+
+    private void CloseSearch()
+    {
+        _searchOpen = false;
+        _focusSearchTrigger = true;
+    }
+
+    private void FollowSearchResult() => _searchOpen = false;
+
+    private void SearchKeyDown(KeyboardEventArgs args)
+    {
+        if (args.Key == "Escape")
+            CloseSearch();
+    }
+
+    private void SearchInputKeyDown(KeyboardEventArgs args)
+    {
+        if (args.Key == "Enter" && SearchResults.FirstOrDefault() is { } entry)
+        {
+            FollowSearchResult();
+            Navigation.NavigateTo(Link(entry.Path));
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_focusSearch)
+        {
+            _focusSearch = false;
+            await _searchInput.FocusAsync();
+        }
+        if (_focusSearchTrigger)
+        {
+            _focusSearchTrigger = false;
+            await _searchTrigger.FocusAsync();
+        }
+    }
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs args)
+    {
+        _menuOpen = false;
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    private void OnConnectionChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private static string RoleLabel(string role) => role switch
+    {
+        "PlatformAdministrator" => "Platform administrator",
+        "ApplicationOwner" => "Application owner",
+        "ProductionSupport" => "Production support",
+        "ReadOnlyAuditor" => "Read-only auditor",
+        _ => role
+    };
+
+    public void Dispose()
+    {
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+        Navigation.LocationChanged -= OnLocationChanged;
+        Live.ConnectionChanged -= OnConnectionChanged;
+    }
+
+    private enum NavRequirement { None, Governance, Administrator }
+
+    private sealed record NavEntry(string Path, string Label, string Icon, string Group,
+        NavRequirement Requirement = NavRequirement.None);
+}

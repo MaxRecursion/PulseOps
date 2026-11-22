@@ -1,0 +1,19 @@
+<article class="stat-card stat-@Tone">
+    <div class="stat-top">
+        <h2>@Label</h2>
+        <span class="stat-icon"><Icon Name="@Glyph" Size="18" /></span>
+    </div>
+    <div class="stat-value">@Value</div>
+    @if (!string.IsNullOrWhiteSpace(Description))
+    {
+        <div class="stat-description">@Description</div>
+    }
+</article>
+
+@code {
+    [Parameter, EditorRequired] public string Label { get; set; } = "";
+    [Parameter, EditorRequired] public string Value { get; set; } = "—";
+    [Parameter, EditorRequired] public string Glyph { get; set; } = "";
+    [Parameter] public string? Description { get; set; }
+    [Parameter] public string Tone { get; set; } = "accent";
+}

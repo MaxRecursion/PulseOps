@@ -1,0 +1,71 @@
+@page "/sessions"
+@inherits ScopedPage
+
+<PageTitle>Sessions · PulseOps</PageTitle>
+<PageHeader Title="Session explorer" Description="Find anonymous browser sessions and reconstruct the events behind an issue." Section="Explore" />
+<ScopeBar Scope="Scope" Updating="Loading" Refresh="RefreshAsync" Extra="Filters" />
+<form class="search-filters" @onsubmit="Search" @onsubmit:preventDefault>
+    <label>Session ID <input type="search" maxlength="64" placeholder="Exact session ID" @bind="_search" /></label>
+    <button class="button primary" type="submit"><Icon Name="search" Size="17" /> Find sessions</button>
+    @if (!string.IsNullOrEmpty(SessionId)) { <a class="button" href="@Scope.Url("sessions")">Clear</a> }
+</form>
+@if (Error is not null || UpdatedAt is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else
+{
+    <section class="panel">
+        <div class="panel-head"><div><h2>Observed sessions</h2><p>Newest activity first. Times shown in UTC.</p></div></div>
+        @if (_rows.Length == 0)
+        {
+            <DataState IconName="sessions" EmptyTitle="No matching sessions" />
+        }
+        else
+        {
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead><tr>
+                        <th scope="col">Session ID</th><th scope="col">Application</th><th scope="col">Version</th>
+                        <th scope="col">Health</th><th scope="col">Last activity</th><th scope="col" class="numeric">Events</th>
+                        <th scope="col" class="numeric">Failures</th>
+                    </tr></thead>
+                    <tbody>
+                        @foreach (var session in _rows)
+                        {
+                            <tr>
+                                <td><a class="mono record-link" title="@session.SessionId" href="@Scope.For(session.Application, session.Environment).Url("sessions/" + Uri.EscapeDataString(session.SessionId))">@Presentation.Id(session.SessionId)</a></td>
+                                <td>@AppLabel(session.Application)<small class="table-secondary">@Presentation.Title(session.Environment)</small></td>
+                                <td class="mono">@session.Version</td>
+                                <td><Badge Text="@session.Health" Dot="true" /></td>
+                                <td><time datetime="@session.LastSeen.ToString("O")">@Presentation.ShortDate(session.LastSeen)</time></td>
+                                <td class="numeric">@Presentation.Count(session.EventCount)</td>
+                                <td class="numeric @(session.Failures > 0 ? "text-danger" : null)">@Presentation.Count(session.Failures)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        <Pager Count="_rows.Length" Offset="Skip" Link="PageLink" />
+    </section>
+}
+
+@code {
+    private BrowserSession[] _rows = [];
+    private string? _search;
+    [SupplyParameterFromQuery] public string? SessionId { get; set; }
+    private (string, string?)[] Filters => [("sessionId", SessionId)];
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        _search = SessionId;
+        var rows = await Api.GetAsync<BrowserSession[]>(Scope.Url("sessions", ("sessionId", SessionId),
+            ("limit", "50"), ("offset", Skip.ToString(CultureInfo.InvariantCulture))), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        _rows = rows;
+    }
+
+    private void Search() => Navigation.NavigateTo(Scope.Url("sessions", ("sessionId", _search?.Trim())));
+    private string PageLink(int offset) => Scope.Url("sessions", ("sessionId", SessionId), ("offset", offset.ToString(CultureInfo.InvariantCulture)));
+}

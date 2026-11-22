@@ -1,0 +1,102 @@
+@inject NavigationManager Navigation
+<div class="scope-bar" role="group" aria-label="Telemetry scope">
+    <label class="scope-field">
+        <span>Application</span>
+        <select value="@(Scope.Application ?? "")" @onchange="ChangeApplication">
+            <option value="">All applications</option>
+            @foreach (var app in Context.Scopes.DistinctBy(scope => scope.Application).OrderBy(scope => scope.Label))
+            {
+                <option value="@app.Application">@app.Label</option>
+            }
+        </select>
+    </label>
+    <label class="scope-field">
+        <span>Environment</span>
+        <select value="@(Scope.Environment ?? "")" @onchange="ChangeEnvironment">
+            <option value="">All environments</option>
+            @foreach (var environment in Environments)
+            {
+                <option value="@environment">@Presentation.Title(environment)</option>
+            }
+        </select>
+    </label>
+    <form class="scope-field version-field" @onsubmit="ApplyVersion" @onsubmit:preventDefault>
+        <label for="scope-version">Version</label>
+        <input id="scope-version" placeholder="All versions" maxlength="40" @bind="_version" @bind:event="oninput" @onblur="ApplyVersion" />
+    </form>
+    <label class="scope-field hours-field">
+        <span>Time range</span>
+        <select value="@Scope.Hours" @onchange="ChangeHours">
+            @if (!HourOptions.Contains(Scope.Hours))
+            {
+                <option value="@Scope.Hours">Last @Scope.Hours hours</option>
+            }
+            <option value="1">Last hour</option>
+            <option value="6">Last 6 hours</option>
+            <option value="12">Last 12 hours</option>
+            <option value="24">Last 24 hours</option>
+            <option value="72">Last 3 days</option>
+            <option value="168">Last 7 days</option>
+            <option value="336">Last 14 days</option>
+        </select>
+    </label>
+    <button type="button" class="button icon-button scope-refresh" title="Refresh data" aria-label="Refresh data" disabled="@Updating" @onclick="Refresh">
+        <Icon Name="refresh" Size="17" Class="@(Updating ? "spin" : null)" />
+    </button>
+</div>
+
+@code {
+    private static readonly int[] HourOptions = [1, 6, 12, 24, 72, 168, 336];
+    private string? _version;
+
+    [CascadingParameter] public PortalContext Context { get; set; } = null!;
+    [Parameter, EditorRequired] public ViewScope Scope { get; set; } = null!;
+    [Parameter] public bool Updating { get; set; }
+    [Parameter] public EventCallback Refresh { get; set; }
+    [Parameter] public (string Key, string? Value)[] Extra { get; set; } = [];
+    private IEnumerable<string> Environments => Context.Scopes
+        .Where(x => Scope.Application is null || x.Application == Scope.Application)
+        .Select(x => x.Environment).Distinct().Order();
+
+    protected override void OnParametersSet()
+    {
+        if (_previousVersion != Scope.Version)
+        {
+            _previousVersion = Scope.Version;
+            _version = Scope.Version;
+        }
+    }
+
+    private string? _previousVersion;
+
+    private void ChangeApplication(ChangeEventArgs args)
+    {
+        var app = BlankToNull(args.Value?.ToString());
+        var environment = Context.Scopes.Any(x => (app is null || x.Application == app) && x.Environment == Scope.Environment)
+            ? Scope.Environment : null;
+        Update(Scope with { Application = app, Environment = environment });
+    }
+
+    private void ChangeEnvironment(ChangeEventArgs args) => Update(Scope with { Environment = BlankToNull(args.Value?.ToString()) });
+
+    private void ChangeHours(ChangeEventArgs args)
+    {
+        if (int.TryParse(args.Value?.ToString(), out var hours))
+            Update(Scope with { Hours = hours });
+    }
+
+    private void ApplyVersion()
+    {
+        var version = BlankToNull(_version);
+        if (version != Scope.Version)
+            Update(Scope with { Version = version });
+    }
+
+    private void Update(ViewScope scope)
+    {
+        var path = Navigation.ToBaseRelativePath(Navigation.Uri).Split('?', '#')[0];
+        Navigation.NavigateTo(scope.Url(path, Extra));
+    }
+
+    private static string? BlankToNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+}

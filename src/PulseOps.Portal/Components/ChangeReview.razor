@@ -1,0 +1,148 @@
+@implements IDisposable
+@inject PortalApi Api
+
+<section class="panel" aria-labelledby="pending-changes-title">
+    <div class="panel-head">
+        <div>
+            <h2 id="pending-changes-title">Pending changes</h2>
+            <p>Proposals wait for a platform administrator. Undecided proposals expire automatically.</p>
+        </div>
+    </div>
+    @if (Context.SelfApproval)
+    {
+        <div class="notice" role="note">
+            <Icon Name="info" Size="16" />
+            <p><strong>Development self-approval is on.</strong> A single local operator can approve their own proposals.
+                Every other environment requires a second administrator.</p>
+        </div>
+    }
+    @if (_notice is not null)
+    {
+        <p class="inline-notice" role="status">@_notice</p>
+    }
+    @if (Changes.Count == 0)
+    {
+        <DataState IconName="check" EmptyTitle="No pending changes" EmptyText="New proposals appear here for review." />
+    }
+    else
+    {
+        <ul class="change-list">
+            @foreach (var change in Changes)
+            {
+                var titleId = "change-" + change.Id;
+                <li>
+                    <article class="change-card" aria-labelledby="@titleId">
+                        <div class="change-head">
+                            <h3 id="@titleId">@ChangeText.Title(change)</h3>
+                            <Badge Text="@change.Status" Tone="@ChangeText.StatusTone(change.Status)" />
+                        </div>
+                        <p class="change-summary">@ChangeText.Summary(change)</p>
+                        <dl class="change-facts">
+                            <div><dt>Scope</dt><dd>@ScopeLabel(change.Application, change.Environment)</dd></div>
+                            <div><dt>Proposed by</dt><dd class="mono">@change.Proposer</dd></div>
+                            <div><dt>Created</dt><dd><time datetime="@change.CreatedAt.ToString("O")">@Presentation.Date(change.CreatedAt)</time></dd></div>
+                            @if (change.BaseRevision is long revision)
+                            {
+                                <div><dt>Base revision</dt><dd>@revision</dd></div>
+                            }
+                        </dl>
+                        <p class="change-reason"><strong>Reason</strong>@change.Reason</p>
+                        @if (change.CanApprove || change.CanWithdraw)
+                        {
+                            <div class="change-actions">
+                                @if (change.CanApprove)
+                                {
+                                    <label>
+                                        <span>Decision note (optional)<span class="sr-only">@($" for {ChangeText.Title(change)}")</span></span>
+                                        <textarea maxlength="500" rows="2" value="@Note(change.Id)" @oninput="args => _notes[change.Id] = args.Value?.ToString() ?? string.Empty"
+                                                  placeholder="Recorded with your decision"></textarea>
+                                    </label>
+                                    <button type="button" class="button primary" disabled="@(_busy is not null)" @onclick="() => DecideAsync(change, true)">
+                                        Approve<span class="sr-only">@($" {ChangeText.Title(change)}")</span>
+                                    </button>
+                                    <button type="button" class="button danger" disabled="@(_busy is not null)" @onclick="() => DecideAsync(change, false)">
+                                        Reject<span class="sr-only">@($" {ChangeText.Title(change)}")</span>
+                                    </button>
+                                }
+                                @if (change.CanWithdraw)
+                                {
+                                    <button type="button" class="button" disabled="@(_busy is not null)" @onclick="() => WithdrawAsync(change)">
+                                        Withdraw<span class="sr-only">@($" {ChangeText.Title(change)}")</span>
+                                    </button>
+                                }
+                            </div>
+                        }
+                        else
+                        {
+                            <p class="field-hint">Awaiting review by a platform administrator.</p>
+                        }
+                        @if (_errors.TryGetValue(change.Id, out var error))
+                        {
+                            <p class="text-danger change-error" role="alert">@error</p>
+                        }
+                    </article>
+                </li>
+            }
+        </ul>
+    }
+</section>
+
+@code {
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly Dictionary<string, string> _notes = [];
+    private readonly Dictionary<string, string> _errors = [];
+    private string? _busy;
+    private string? _notice;
+
+    [CascadingParameter] public PortalContext Context { get; set; } = null!;
+    [Parameter, EditorRequired] public IReadOnlyList<ConfigChange> Changes { get; set; } = [];
+    /// <summary>Raised after a decision or withdrawal so the page reloads its lists.</summary>
+    [Parameter] public EventCallback<string> Changed { get; set; }
+
+    protected override void OnParametersSet()
+    {
+        var current = Changes.Select(change => change.Id).ToHashSet();
+        foreach (var id in _notes.Keys.Where(id => !current.Contains(id)).ToArray())
+            _notes.Remove(id);
+        foreach (var id in _errors.Keys.Where(id => !current.Contains(id)).ToArray())
+            _errors.Remove(id);
+    }
+
+    private string Note(string id) => _notes.TryGetValue(id, out var note) ? note : "";
+
+    private Task DecideAsync(ConfigChange change, bool approve) => RunAsync(change,
+        token => Api.DecideChangeAsync(change.Id, approve, Note(change.Id), Context.CsrfToken, token),
+        (approve ? "Approved: " : "Rejected: ") + ChangeText.Title(change) + ".");
+
+    private Task WithdrawAsync(ConfigChange change) => RunAsync(change,
+        token => Api.WithdrawChangeAsync(change.Id, Context.CsrfToken, token), "Withdrawn: " + ChangeText.Title(change) + ".");
+
+    private async Task RunAsync(ConfigChange change, Func<CancellationToken, Task> action, string success)
+    {
+        if (_busy is not null)
+            return;
+        _busy = change.Id;
+        _notice = null;
+        _errors.Remove(change.Id);
+        try
+        {
+            await action(_lifetime.Token);
+            _notes.Remove(change.Id);
+            _notice = success;
+            await Changed.InvokeAsync(success);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (PortalRequestException exception) { _errors[change.Id] = exception.Message; }
+        catch (Exception) { _errors[change.Id] = "Could not reach PulseOps. Check your connection and retry."; }
+        finally { _busy = null; }
+    }
+
+    private string ScopeLabel(string application, string environment) => application.Length == 0 ? "Platform"
+        : $"{Context.Scopes.FirstOrDefault(scope => scope.Application == application)?.Label ?? application} · {Presentation.Title(environment)}";
+
+    public void Dispose()
+    {
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+}

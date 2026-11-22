@@ -1,0 +1,40 @@
+@if (Services.Count == 0)
+{
+    <DataState IconName="apps" EmptyTitle="No applications in this scope" EmptyText="Check the selected filters or ask an administrator to register an application." />
+}
+else
+{
+    <div class="table-scroll">
+        <table class="data-table service-table">
+            <thead><tr>
+                <th scope="col">Application</th><th scope="col">Environment</th>
+                <th scope="col" class="numeric">Requests</th>
+                <th scope="col" class="numeric">Error rate</th>
+                <th scope="col" class="numeric">P95</th>
+                <th scope="col" class="numeric">Sessions</th>
+            </tr></thead>
+            <tbody>
+                @foreach (var service in Services)
+                {
+                    <tr>
+                        <td>
+                            <div class="service-name">
+                                <a href="@Scope.For(service.Application, service.Environment).Url("")">@service.Label</a>
+                            </div>
+                        </td>
+                        <td class="env-name">@Presentation.Title(service.Environment)</td>
+                        <td class="numeric">@Presentation.Count(service.Requests)</td>
+                        <td class="numeric @(service.Failures > 0 ? "text-danger" : null)">@Presentation.Percent(service.Failures, service.Requests)</td>
+                        <td class="numeric">@Presentation.Duration(service.P95)</td>
+                        <td class="numeric">@Presentation.Count(service.Sessions)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<ServiceSummary> Services { get; set; } = [];
+    [Parameter, EditorRequired] public ViewScope Scope { get; set; } = null!;
+}

@@ -1,0 +1,46 @@
+<div class="table-scroll">
+    <table class="data-table">
+        <thead><tr>
+            <th scope="col">Time (UTC)</th><th scope="col">Event</th><th scope="col">Application</th>
+            <th scope="col">Outcome</th><th scope="col" class="numeric">Value</th><th scope="col">Correlation</th>
+        </tr></thead>
+        <tbody>
+            @foreach (var entry in Events)
+            {
+                <tr>
+                    <td><time datetime="@entry.OccurredAt.ToString("O")" title="@Presentation.Date(entry.OccurredAt)">@Presentation.ShortDate(entry.OccurredAt)</time></td>
+                    <td>
+                        <strong class="table-main">@entry.Name</strong>
+                        <small class="table-secondary">@EventKinds.LabelFor(entry.Kind)@(!string.IsNullOrWhiteSpace(entry.Category) ? " · " + entry.Category : "")</small>
+                        @if (entry.Anonymous) { <small class="table-secondary">Anonymous startup report</small> }
+                    </td>
+                    <td>@AppLabel(entry.Application)<small class="table-secondary">@Presentation.Title(entry.Environment) · @entry.Version</small></td>
+                    <td>
+                        @if (entry.Outcome is { Length: > 0 }) { <Badge Text="@entry.Outcome" /> }
+                        @if (entry.StatusCode is int status) { <small class="table-secondary">HTTP @status</small> }
+                    </td>
+                    <td class="numeric">@(entry.DurationMs.HasValue ? Presentation.Duration(entry.DurationMs) : entry.Value is double value ? Presentation.Number(value) : "—")</td>
+                    <td>
+                        <div class="event-links">
+                            @if (entry.SessionId is { Length: > 0 })
+                            {
+                                <a href="@Scope.For(entry.Application, entry.Environment).Url("sessions/" + Uri.EscapeDataString(entry.SessionId))">Session</a>
+                            }
+                            @if (entry.TraceId is { Length: > 0 })
+                            {
+                                <a href="@Scope.For(entry.Application, entry.Environment).Url("traces", ("traceId", entry.TraceId))">Trace</a>
+                            }
+                        </div>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    [CascadingParameter] public PortalContext Context { get; set; } = null!;
+    [Parameter, EditorRequired] public IReadOnlyList<TelemetryEvent> Events { get; set; } = [];
+    [Parameter, EditorRequired] public ViewScope Scope { get; set; } = null!;
+    private string AppLabel(string value) => Context.Scopes.FirstOrDefault(scope => scope.Application == value)?.Label ?? value;
+}

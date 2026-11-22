@@ -1,0 +1,174 @@
+@if (Times.Count == 0 || !_series.Any(series => series.Values.Any(value => value.HasValue)))
+{
+    <DataState IconName="metrics" EmptyTitle="No chart samples" EmptyText="Telemetry will appear here after it is processed." />
+}
+else
+{
+    <div class="chart-key" aria-label="Chart legend">
+        @foreach (var series in _series)
+        {
+            <span><svg class="series-key" viewBox="0 0 16 10" aria-hidden="true">
+                @if (series.Columns)
+                {
+                    <rect x="3" y="2" width="10" height="6" fill="@series.Color" />
+                }
+                else
+                {
+                    <line x1="0" x2="16" y1="5" y2="5" stroke="@series.Color" stroke-width="2" stroke-dasharray="@(series.Dashed ? "5 2" : null)" />
+                }
+            </svg>@series.Label</span>
+        }
+    </div>
+    <div class="chart-shell">
+        <div class="chart-y" aria-hidden="true">
+            @for (var i = 4; i >= 0; i--)
+            {
+                <span>@Format(_maximum * i / 4)</span>
+            }
+        </div>
+        <div class="chart-plot">
+            <svg class="line-chart" viewBox="0 0 1000 185" preserveAspectRatio="none" role="img"
+                 aria-label="@Label" @onpointerleave="ClearPoint">
+                @for (var i = 0; i < 5; i++)
+                {
+                    <line class="chart-grid" x1="0" x2="1000" y1="@F(i * 46.25)" y2="@F(i * 46.25)" vector-effect="non-scaling-stroke" />
+                }
+                @for (var i = 0; i < _series.Length; i++)
+                {
+                    var series = _series[i];
+                    if (series.Columns)
+                    {
+                        for (var sample = 0; sample < Times.Count; sample++)
+                        {
+                            if (series.Values[sample] is double value)
+                            {
+                                var barWidth = 760d / Times.Count;
+                                <rect x="@F(X(sample) - barWidth / 2)" y="@F(Y(value))" width="@F(barWidth)"
+                                      height="@F(185 - Y(value))" fill="@series.Color" />
+                            }
+                        }
+                        continue;
+                    }
+                    foreach (var segment in Segments(series))
+                    {
+                        if (segment.Length == 1)
+                        {
+                            <circle cx="@F(segment[0].X)" cy="@F(segment[0].Y)" r="3" fill="@series.Color" />
+                        }
+                        else
+                        {
+                            <path d="@Line(segment)" fill="none" stroke="@series.Color" stroke-width="1.8"
+                                  stroke-dasharray="@(series.Dashed ? "6 5" : null)" stroke-linecap="round"
+                                  stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+                        }
+                    }
+                }
+                @if (_active is int active && active < Times.Count)
+                {
+                    var x = X(active);
+                    <line class="chart-cursor" x1="@F(x)" x2="@F(x)" y1="0" y2="185" vector-effect="non-scaling-stroke" />
+                    @foreach (var series in _series.Where(series => series.Values[active].HasValue))
+                    {
+                        <circle cx="@F(x)" cy="@F(Y(series.Values[active]!.Value))" r="3.5" fill="@series.Color" />
+                    }
+                }
+                @for (var i = 0; i < Times.Count; i++)
+                {
+                    var point = i;
+                    var left = i == 0 ? 0 : (X(i - 1) + X(i)) / 2;
+                    var right = i == Times.Count - 1 ? 1000 : (X(i) + X(i + 1)) / 2;
+                    <rect x="@F(left)" width="@F(right - left)" y="0" height="185" fill="transparent"
+                          @onpointerenter="() => _active = point" />
+                }
+            </svg>
+            @if (_active is int shown && shown < Times.Count)
+            {
+                <div class="chart-tooltip @(X(shown) > 520 ? "left-of-point" : null)" aria-hidden="true">
+                    <strong>@Presentation.ShortDate(Times[shown]) UTC</strong>
+                    @foreach (var series in _series)
+                    {
+                        <div>@series.Label
+                            <b>@(series.Values[shown] is double value ? Format(value) : "—")</b>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+        <div class="chart-x" aria-hidden="true">
+            @foreach (var index in TickIndexes)
+            {
+                <span>@Times[index].UtcDateTime.ToString(Times[^1] - Times[0] > TimeSpan.FromDays(1) ? "dd MMM" : "HH:mm", CultureInfo.InvariantCulture)</span>
+            }
+        </div>
+    </div>
+    <details class="chart-values">
+        <summary>Chart values <span>UTC</span></summary>
+        <p class="chart-note">First and last intervals may cover partial time buckets.</p>
+        <div class="chart-table table-scroll">
+            <table class="data-table">
+                <thead><tr><th scope="col">Timestamp</th>
+                    @foreach (var series in _series) { <th scope="col" class="numeric">@series.Label</th> }
+                </tr></thead>
+                <tbody>
+                    @for (var i = 0; i < Times.Count; i++)
+                    {
+                        <tr><td>@Presentation.Date(Times[i])</td>
+                            @foreach (var series in _series)
+                            {
+                                <td class="numeric">@(series.Values[i] is double value ? Format(value) : "—")</td>
+                            }
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </details>
+}
+
+@code {
+    private int? _active;
+    private double _maximum;
+    private ChartSeries[] _series = [];
+
+    [Parameter, EditorRequired] public string Label { get; set; } = "";
+    [Parameter, EditorRequired] public IReadOnlyList<DateTimeOffset> Times { get; set; } = [];
+    [Parameter, EditorRequired] public IReadOnlyList<ChartSeries> Series { get; set; } = [];
+    [Parameter] public string Unit { get; set; } = "";
+
+    protected override void OnParametersSet()
+    {
+        _series = Series.Where(series => series.Values.Count == Times.Count).ToArray();
+        var peak = _series.SelectMany(series => series.Values).Where(value => value.HasValue)
+            .Select(value => value!.Value).DefaultIfEmpty(0).Max();
+        var unit = Math.Pow(10, Math.Floor(Math.Log10(Math.Max(peak / 4, 0.01))));
+        var rough = peak / 4 / unit;
+        _maximum = peak > 0 ? (rough <= 1 ? 1 : rough <= 2 ? 2 : rough <= 5 ? 5 : 10) * unit * 4 : 4;
+        _active = null;
+    }
+
+    private IEnumerable<int> TickIndexes => Enumerable.Range(0, Math.Min(Times.Count, 5))
+        .Select(i => Math.Min(Times.Count, 5) == 1 ? 0 : (int)Math.Round((Times.Count - 1) * i / (double)(Math.Min(Times.Count, 5) - 1)));
+    private double X(int index) => (index + 0.5d) * 1000 / Times.Count;
+    private double Y(double value) => 185 * (1 - Math.Clamp(value / _maximum, 0, 1));
+    private string Format(double value) => Unit == "ms" ? Presentation.Duration(value) : Presentation.Number(value) + Unit;
+    private void ClearPoint() => _active = null;
+    private static string F(double n) => n.ToString("0.##", CultureInfo.InvariantCulture);
+    private static string Line((double X, double Y)[] points) =>
+        "M" + string.Join(" L", points.Select(point => F(point.X) + " " + F(point.Y)));
+    private IEnumerable<(double X, double Y)[]> Segments(ChartSeries series)
+    {
+        var points = new List<(double X, double Y)>();
+        for (var i = 0; i < series.Values.Count; i++)
+        {
+            if (series.Values[i] is double value)
+                points.Add((X(i), Y(value)));
+            else if (points.Count > 0)
+            {
+                yield return points.ToArray();
+                points.Clear();
+            }
+        }
+        if (points.Count > 0)
+            yield return points.ToArray();
+    }
+}

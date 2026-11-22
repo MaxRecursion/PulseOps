@@ -1,0 +1,23 @@
+@if (Offset > 0 || Count >= PageSize)
+{
+    <nav class="pager" aria-label="Results pages">
+        <span>@(Count == 0 ? "No results on this page" : $"Showing {Offset + 1:N0}–{Offset + Count:N0}")</span>
+        <div class="pager-links">
+            @if (Offset > 0)
+            {
+                <a class="button" href="@Link(Math.Max(0, Offset - PageSize))">Previous</a>
+            }
+            @if (Count >= PageSize)
+            {
+                <a class="button" href="@Link(Offset + PageSize)">Next</a>
+            }
+        </div>
+    </nav>
+}
+
+@code {
+    [Parameter, EditorRequired] public int Offset { get; set; }
+    [Parameter, EditorRequired] public int Count { get; set; }
+    [Parameter, EditorRequired] public Func<int, string> Link { get; set; } = null!;
+    [Parameter] public int PageSize { get; set; } = 50;
+}

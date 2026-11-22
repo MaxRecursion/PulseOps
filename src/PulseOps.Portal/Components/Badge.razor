@@ -1,0 +1,13 @@
+<span class="badge badge-@(Tone ?? Presentation.Tone(Text))">
+    @if (Dot)
+    {
+        <span class="badge-dot" aria-hidden="true"></span>
+    }
+    @Text
+</span>
+
+@code {
+    [Parameter, EditorRequired] public string Text { get; set; } = "";
+    [Parameter] public string? Tone { get; set; }
+    [Parameter] public bool Dot { get; set; }
+}

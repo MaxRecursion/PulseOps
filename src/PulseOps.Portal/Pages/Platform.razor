@@ -1,0 +1,73 @@
+@page "/platform"
+@inherits ScopedPage
+
+<PageTitle>Platform health · PulseOps</PageTitle>
+<PageHeader Title="Platform health" Description="Inspect SQLite storage, processing backlog, dead letters, notifications and the worker heartbeat." Section="Administration">
+    <Actions>
+        <button type="button" class="button" @onclick="RefreshAsync" disabled="@Loading"><Icon Name="refresh" /> Refresh</button>
+    </Actions>
+</PageHeader>
+@if (Error is not null || UpdatedAt is null || _health is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else
+{
+    @foreach (var warning in Warnings(_health, UpdatedAt.Value))
+    {
+        <div class="inline-notice" role="status"><Icon Name="info" Size="16" /> @warning</div>
+    }
+    <section class="stat-grid" aria-label="Platform metrics">
+        <StatCard Label="Pending items" Value="@Presentation.Count(_health.Pending)" Glyph="layers" Description="Durable ingestion inbox" />
+        <StatCard Label="Processed events" Value="@Presentation.Count(_health.Processed)" Glyph="check" Description="Recorded processed events" Tone="teal" />
+        <StatCard Label="Dead letters" Value="@Presentation.Count(_health.DeadLetters)" Glyph="incidents" Description="Quarantined records awaiting replay" Tone="orange" />
+        <StatCard Label="Storage size" Value="@DisplayBytes(_health.DatabaseBytes)" Glyph="server" Description="SQLite database, WAL and shared memory" Tone="blue" />
+    </section>
+    <section class="stat-grid" aria-label="Operations metrics">
+        <StatCard Label="Monitors alerting" Value="@Presentation.Count(_health.MonitorsAlerting)" Glyph="monitors" Description="Scheduled monitors in Alert" Tone="orange" />
+        <StatCard Label="Notifications" Value="@Presentation.Count(_health.NotificationsPending)" Glyph="clock" Description="@($"Pending delivery · {Presentation.Count(_health.NotificationFailures)} failed")" />
+        <StatCard Label="Pending changes" Value="@Presentation.Count(_health.PendingChanges)" Glyph="admin" Description="Awaiting a second administrator" Tone="teal" />
+        <StatCard Label="Audit entries" Value="@Presentation.Count(_health.AuditEntries)" Glyph="archive" Description="Hash-chained, append-only" Tone="blue" />
+    </section>
+    <section class="panel">
+        <div class="panel-head"><div><h2>Worker and host diagnostics</h2><p>Time markers reflect UTC. Process figures describe the web host, which includes the embedded worker when it is enabled.</p></div></div>
+        <dl class="detail-facts">
+            <div><dt>Last worker heartbeat</dt><dd>@(_health.WorkerHeartbeat is { } heartbeat ? Presentation.Date(heartbeat) : "No heartbeat recorded")</dd></div>
+            <div><dt>Oldest pending item</dt><dd>@(_health.OldestPendingAt is { } waiting ? Presentation.Date(waiting) : "Inbox empty")</dd></div>
+            <div><dt>Rollup backfill remaining</dt><dd>@(_health.RollupBackfillRemaining == 0 ? "Complete" : Presentation.Count(_health.RollupBackfillRemaining) + " rows")</dd></div>
+            <div><dt>Free disk on the database volume</dt><dd>@(_health.FreeDiskBytes is { } free ? DisplayBytes(free) : "Unavailable")</dd></div>
+            <div><dt>Host working set</dt><dd>@DisplayBytes(_health.ProcessWorkingSetBytes)</dd></div>
+            <div><dt>Host CPU time</dt><dd>@(Presentation.Number(_health.ProcessCpuSeconds)) s@(_health.ProcessStartedAt is { } started ? $" since {Presentation.Date(started)}" : "")</dd></div>
+            <div><dt>Last refreshed</dt><dd>@Presentation.Date(UpdatedAt.Value)</dd></div>
+        </dl>
+    </section>
+}
+
+@code {
+    private PlatformHealth? _health;
+    protected override bool LiveRefresh => true;
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        var health = await Api.GetAsync<PlatformHealth>("platform", cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        _health = health;
+    }
+
+    internal static IEnumerable<string> Warnings(PlatformHealth health, DateTimeOffset now)
+    {
+        if (health.WorkerHeartbeat is not { } heartbeat || now - heartbeat > TimeSpan.FromSeconds(90))
+            yield return "The processing worker has not reported within 90 seconds. Readiness reports unavailable until it does.";
+        if (health.OldestPendingAt is { } oldest && now - oldest > TimeSpan.FromMinutes(5))
+            yield return $"Processing backlog: the oldest pending item has waited {(int)(now - oldest).TotalMinutes} minutes.";
+        if (health.DeadLetters > 0)
+            yield return "Some telemetry records were quarantined. Deploy a fix, then run the replay command described in the operations guide.";
+        if (health.NotificationFailures > 0)
+            yield return "Some notifications failed permanently. Check the destination configuration and connectivity.";
+    }
+
+    private static string DisplayBytes(long bytes) => bytes >= 1024L * 1024 * 1024
+        ? Presentation.Number(bytes / (1024d * 1024 * 1024)) + " GiB"
+        : bytes >= 1024 * 1024 ? Presentation.Number(bytes / (1024d * 1024)) + " MiB"
+        : Presentation.Number(bytes / 1024d) + " KiB";
+}

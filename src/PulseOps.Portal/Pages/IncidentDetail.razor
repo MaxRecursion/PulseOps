@@ -1,0 +1,142 @@
+@page "/incidents/{Id:guid}"
+@inherits ScopedPage
+
+<PageTitle>Incident details · PulseOps</PageTitle>
+<a class="back-link" href="@Scope.Url("incidents")">All incidents</a>
+
+@if (Error is not null || UpdatedAt is null || _details is null)
+{
+    <PageHeader Title="Incident details" Section="Incident" />
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else
+{
+    var incident = _details.Incident;
+    <PageHeader Title="@incident.Title" Description="@($"{AppLabel(incident.Application)} · {Presentation.Title(incident.Environment)}")" Section="Incident">
+        <Actions>
+            <Badge Text="@incident.Severity" Dot="true" /> <Badge Text="@incident.Status" />
+            <button class="button icon-button" type="button" aria-label="Refresh incident" title="Refresh incident" disabled="@Loading" @onclick="RefreshAsync"><Icon Name="refresh" /></button>
+        </Actions>
+    </PageHeader>
+    <div class="detail-grid">
+        <section class="panel">
+            <div class="panel-head"><div><h2>Observed evidence</h2><p>Rule evidence at the latest detection.</p></div></div>
+            <p class="evidence">@incident.Evidence</p>
+            <dl class="detail-facts">
+                <div><dt>Signal</dt><dd>@incident.Kind · @incident.Name</dd></div>
+                <div><dt>Occurrences</dt><dd>@Presentation.Count(incident.Count)</dd></div>
+                <div><dt>First seen</dt><dd>@Presentation.Date(incident.FirstSeen)</dd></div>
+                <div><dt>Last seen</dt><dd>@Presentation.Date(incident.LastSeen)</dd></div>
+                <div><dt>Assignee</dt><dd>@(string.IsNullOrWhiteSpace(incident.Assignee) ? "Unassigned" : incident.Assignee)</dd></div>
+                <div><dt>Incident ID</dt><dd class="mono">@incident.Id</dd></div>
+            </dl>
+            <div class="panel-footer">
+                <a class="button" href="@Scope.For(incident.Application, incident.Environment).Url("logs", ("kind", incident.Kind), ("name", incident.Name))">Inspect related events</a>
+            </div>
+        </section>
+        @if (Context.CanManage)
+        {
+            <section class="panel">
+                <div class="panel-head"><div><h2>Update incident</h2><p>Actions are recorded in the activity history.</p></div></div>
+                <form class="detail-form" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                    <label>Status
+                        <select aria-label="Status" @bind="_status">
+                            @foreach (var status in StatusOptions(incident.Status))
+                            {
+                                <option value="@status">@status</option>
+                            }
+                        </select>
+                    </label>
+                    <label>Assignee <input @bind="_assignee" maxlength="80" placeholder="Unassigned" /></label>
+                    <label>Comment <textarea @bind="_note" @bind:event="oninput" maxlength="500" rows="4" placeholder="Add an investigation or mitigation update"></textarea></label>
+                    @if (_saveError is not null) { <p role="alert" class="text-danger">@_saveError</p> }
+                    @if (_saved) { <p role="status" class="text-good">Incident updated.</p> }
+                    <button class="button primary" type="submit" disabled="@_saving">@(_saving ? "Saving…" : "Save update")</button>
+                </form>
+            </section>
+        }
+    </div>
+    <section class="panel">
+        <div class="panel-head"><div><h2>Activity history</h2><p>Lifecycle updates and operator notes.</p></div></div>
+        @if (_details.History.Length == 0)
+        {
+            <DataState IconName="clock" EmptyTitle="No activity entries" EmptyText="Incident actions will appear here." />
+        }
+        else
+        {
+            <ol class="timeline">
+                @foreach (var entry in _details.History.OrderByDescending(entry => entry.At))
+                {
+                    <li>
+                        <span class="timeline-marker"></span>
+                        <time datetime="@entry.At.ToString("O")" class="timeline-time">@Presentation.Date(entry.At)</time>
+                        <div class="timeline-content">
+                            <div class="timeline-title"><Badge Text="@entry.Status" /> <strong>@entry.Actor</strong></div>
+                            @if (!string.IsNullOrWhiteSpace(entry.Note)) { <p>@entry.Note</p> }
+                            @if (!string.IsNullOrWhiteSpace(entry.Assignee)) { <small>Assigned to @entry.Assignee</small> }
+                        </div>
+                    </li>
+                }
+            </ol>
+        }
+    </section>
+}
+
+@code {
+    private IncidentDetails? _details;
+    private string? _loadedId;
+    private string? _status;
+    private string? _assignee;
+    private string? _note;
+    private string? _saveError;
+    private bool _saving;
+    private bool _saved;
+
+    [Parameter] public Guid Id { get; set; }
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        var data = await Api.GetAsync<IncidentDetails>("incidents/" + Id.ToString("D"), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var newIncident = _loadedId != data.Incident.Id;
+        _details = data;
+        _loadedId = data.Incident.Id;
+        _status = data.Incident.Status;
+        _assignee = data.Incident.Assignee;
+        if (newIncident)
+        {
+            _note = null;
+            _saveError = null;
+            _saved = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_details is null || _saving || _status is null)
+            return;
+
+        _saving = true;
+        _saved = false;
+        _saveError = null;
+        try
+        {
+            await Api.UpdateIncidentAsync(Id.ToString("D"), new IncidentUpdate(_status, _note, _assignee), Context.CsrfToken, Lifetime);
+            _note = null;
+            _saved = true;
+            await RefreshAsync();
+        }
+        catch (OperationCanceledException) when (Lifetime.IsCancellationRequested) { }
+        catch (PortalRequestException exception) { _saveError = exception.Message; }
+        catch (Exception) { _saveError = "Could not save the update. Check your connection and retry."; }
+        finally { _saving = false; }
+    }
+
+    private static IEnumerable<string> StatusOptions(string current)
+    {
+        string[] other = current == "Resolved"
+            ? ["Reopened"]
+            : ["Acknowledged", "Investigating", "Mitigated", "Resolved"];
+        return other.Prepend(current).Distinct();
+    }
+}

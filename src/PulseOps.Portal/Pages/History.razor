@@ -1,0 +1,187 @@
+@page "/history"
+@inherits ScopedPage
+
+<PageTitle>History · PulseOps</PageTitle>
+<PageHeader Title="Long-range history" Description="Hourly and daily rollups of processed telemetry, kept beyond the raw event retention." Section="Explore" />
+<ScopeFilter Scope="Scope" Updating="Loading" Refresh="RefreshAsync" Extra="Filters" />
+<form class="search-filters" @onsubmit="Apply" @onsubmit:preventDefault>
+    <label>Range
+        <select @bind="_days">
+            @if (!DayOptions.Contains(SelectedDays))
+            {
+                <option value="@SelectedDays">Last @SelectedDays days</option>
+            }
+            @foreach (var days in DayOptions)
+            {
+                <option value="@days">Last @days days</option>
+            }
+        </select>
+    </label>
+    <label>Event type
+        <select @bind="_kind">
+            @foreach (var kind in Kinds)
+            {
+                <option value="@kind">@EventKinds.LabelFor(kind)</option>
+            }
+        </select>
+    </label>
+    <label>Event alias <input type="search" maxlength="64" placeholder="All aliases" @bind="_name" /></label>
+    <label>Version <input type="search" maxlength="32" placeholder="All versions" @bind="_version" /></label>
+    <button class="button primary" type="submit">Apply</button>
+    @if (!string.IsNullOrEmpty(Name) || !string.IsNullOrEmpty(Version))
+    {
+        <a class="button" href="@((Scope with { Version = null }).Url("history", ("days", DaysText), ("kind", SelectedKind)))">Clear alias and version</a>
+    }
+    @if (_filterError is not null)
+    {
+        <p class="text-danger filter-error" role="alert">@_filterError</p>
+    }
+</form>
+
+@if (Error is not null || UpdatedAt is null || _data is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else if (_points.Length == 0 || _points.All(point => point.Total == 0))
+{
+    <section class="panel">
+        <div class="panel-head"><div><h2>@EventKinds.LabelFor(SelectedKind) history</h2><p>@ResolutionText</p></div></div>
+        <DataState IconName="history" EmptyTitle="No rollup history for this selection"
+                   EmptyText="Rollups are built from processed telemetry. Choose a longer range, another event type or clear the alias and version filters." />
+    </section>
+}
+else
+{
+    <section class="stat-grid" aria-label="History summary">
+        <StatCard Label="Events" Value="@Presentation.Count(_total)" Glyph="layers"
+                  Description="@($"{Presentation.Count(_failures)} failed · {Presentation.Count(_points.Sum(point => point.Degraded))} degraded")" />
+        <StatCard Label="Failure rate" Value="@Presentation.Percent(_failures, _total)" Glyph="incidents" Tone="orange"
+                  Description="@($"{Presentation.Count(_points.Sum(point => point.Cancelled))} cancelled")" />
+        <StatCard Label="Highest p95" Value="@Presentation.Duration(_points.Max(point => point.P95))" Glyph="clock" Tone="blue"
+                  Description="@($"Worst {BucketName} in range (approximate)")" />
+        <StatCard Label="Longest duration" Value="@Presentation.Duration(_points.Max(point => point.MaxMs))" Glyph="metrics" Tone="teal"
+                  Description="Slowest single event" />
+    </section>
+    <div class="chart-pair">
+        <section class="panel chart-card">
+            <div class="panel-head"><div><h2>Event volume</h2><p>@ResolutionText</p></div></div>
+            <TimeSeries Label="@($"Total and failed events per {BucketName}")" Times="_times" Series="_volume" />
+        </section>
+        <section class="panel chart-card">
+            <div class="panel-head"><div><h2>Latency percentiles</h2><p>P50, P95 and P99 per @BucketName. Empty buckets have no percentile.</p></div></div>
+            <TimeSeries Label="@($"P50, P95 and P99 latency per {BucketName}")" Times="_times" Series="_latency" Unit="ms" />
+            @if (_data.ApproximatePercentiles)
+            {
+                <p class="panel-note">Percentiles are approximate (about +/-2%) because they come from mergeable rollup histograms.</p>
+            }
+        </section>
+    </div>
+    <section class="panel">
+        <div class="panel-head"><div><h2>Top series</h2><p>The busiest aliases in the range. Select an alias to focus the charts on it.</p></div></div>
+        @if (_data.Series is not { Length: > 0 } series)
+        {
+            <DataState IconName="history" EmptyTitle="No series in this range" />
+        }
+        else
+        {
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead><tr>
+                        <th scope="col">Alias</th><th scope="col">Application</th><th scope="col">Event type</th>
+                        <th scope="col" class="numeric">Events</th><th scope="col" class="numeric">Failure rate</th>
+                        <th scope="col" class="numeric">P95 (approx.)</th>
+                    </tr></thead>
+                    <tbody>
+                        @foreach (var item in series)
+                        {
+                            <tr>
+                                <td><a class="record-link" href="@Scope.For(item.Application, item.Environment).Url("history", ("days", DaysText), ("kind", item.Kind), ("name", item.Name))">@item.Name</a></td>
+                                <td>@AppLabel(item.Application)<small class="table-secondary">@Presentation.Title(item.Environment)</small></td>
+                                <td>@EventKinds.LabelFor(item.Kind)</td>
+                                <td class="numeric">@Presentation.Count(item.Total)</td>
+                                <td class="numeric @(item.Failures > 0 ? "text-danger" : null)">@Presentation.Percent(item.Failures, item.Total)</td>
+                                <td class="numeric">@Presentation.Duration(item.P95)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+}
+
+@code {
+    private static readonly int[] DayOptions = [7, 30, 90, 180];
+    private static readonly string[] Kinds = ["api", "operation", "startup", "navigation", "synthetic"];
+
+    [SupplyParameterFromQuery(Name = "days")] public int? Days { get; set; }
+    [SupplyParameterFromQuery(Name = "kind")] public string? Kind { get; set; }
+    [SupplyParameterFromQuery(Name = "name")] public string? Name { get; set; }
+
+    private HistoryResult? _data;
+    private HistoryPoint[] _points = [];
+    private DateTimeOffset[] _times = [];
+    private ChartSeries[] _volume = [];
+    private ChartSeries[] _latency = [];
+    private long _total;
+    private long _failures;
+    private int _days = 30;
+    private string _kind = "api";
+    private string? _name;
+    private string? _version;
+    private string? _filterError;
+
+    private int SelectedDays => Days is >= 1 and <= 3650 ? Days.Value : 30;
+    private string DaysText => SelectedDays.ToString(CultureInfo.InvariantCulture);
+    private string SelectedKind => Kinds.Contains(Kind) ? Kind! : "api";
+    private string? SelectedName => string.IsNullOrWhiteSpace(Name) ? null : Name.Trim();
+    private (string, string?)[] Filters => [("days", DaysText), ("kind", SelectedKind), ("name", SelectedName)];
+    private string BucketName => _data?.Resolution == "day" ? "day" : "hour";
+    private string ResolutionText => _data is null ? "" :
+        $"{(_data.Resolution == "day" ? "Daily" : "Hourly")} buckets from {Presentation.Date(_data.From)} to {Presentation.Date(_data.Until)}.";
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        (_days, _kind, _name, _version, _filterError) = (SelectedDays, SelectedKind, SelectedName, Version, null);
+        var data = await Api.GetAsync(PortalApi.Query("history", ("application", Application), ("environment", Environment),
+            ("kind", SelectedKind), ("name", SelectedName), ("version", Version), ("days", DaysText), ("resolution", "auto")),
+            AdminJson.Default.HistoryResult, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var points = (data.Points ?? []).OrderBy(point => point.At).ToArray();
+        _data = data;
+        _points = points;
+        _total = points.Sum(point => point.Total);
+        _failures = points.Sum(point => point.Failures);
+        _times = points.Select(point => point.At).ToArray();
+        _volume =
+        [
+            new("All events", "var(--series-forest)", points.Select(point => (double?)point.Total).ToArray(), Columns: true),
+            new("Failures", "var(--series-rust)", points.Select(point => (double?)point.Failures).ToArray(), Dashed: true)
+        ];
+        _latency =
+        [
+            new("P50", "var(--series-teal)", points.Select(point => point.P50).ToArray()),
+            new("P95", "var(--series-gold)", points.Select(point => point.P95).ToArray()),
+            new("P99", "var(--series-rose)", points.Select(point => point.P99).ToArray(), Dashed: true)
+        ];
+    }
+
+    private void Apply()
+    {
+        var name = string.IsNullOrWhiteSpace(_name) ? null : _name.Trim();
+        var version = string.IsNullOrWhiteSpace(_version) ? null : _version.Trim();
+        if (name is not null && !MonitorRules.IsAlias(name))
+        {
+            _filterError = "An event alias has 1-64 letters, digits, dots, underscores or hyphens.";
+            return;
+        }
+        if (version is not null && (version.Length > 32 || !MonitorRules.IsAlias(version)))
+        {
+            _filterError = "A version has 1-32 letters, digits, dots, underscores or hyphens.";
+            return;
+        }
+        _filterError = null;
+        Navigation.NavigateTo((Scope with { Version = version }).Url("history",
+            ("days", _days.ToString(CultureInfo.InvariantCulture)), ("kind", _kind), ("name", name)));
+    }
+}

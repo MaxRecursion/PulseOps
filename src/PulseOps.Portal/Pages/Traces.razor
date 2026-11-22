@@ -1,0 +1,137 @@
+@page "/traces"
+@inherits ScopedPage
+
+<PageTitle>Traces · PulseOps</PageTitle>
+<PageHeader Title="Trace explorer" Description="Correlate API calls, browser operations, and failures through observed trace IDs." Section="Explore" />
+<ScopeBar Scope="Scope" Updating="Loading" Refresh="RefreshAsync" Extra="Filters" />
+<form class="search-filters" @onsubmit="Search" @onsubmit:preventDefault>
+    <label>Trace ID <input class="mono" type="search" maxlength="32" placeholder="Exact trace ID" @bind="_search" /></label>
+    <button class="button primary" type="submit"><Icon Name="search" Size="17" /> Find trace</button>
+    @if (!string.IsNullOrEmpty(TraceId)) { <a class="button" href="@Scope.Url("traces")">Clear</a> }
+</form>
+
+@if (Error is not null || UpdatedAt is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else if (!string.IsNullOrWhiteSpace(TraceId))
+{
+    <section class="panel">
+        <div class="panel-head"><div><h2>Span waterfall</h2><p>Observed span durations positioned relative to the earliest inferred start in this page.</p></div></div>
+        @if (_waterfall.Length == 0)
+        {
+            <DataState IconName="traces" EmptyTitle="No timed spans" EmptyText="Correlated events may still be available below." />
+        }
+        else
+        {
+            @if (_waterfall.Any(item => item.ParentMissing))
+            {
+                <div class="inline-notice"><Icon Name="info" Size="16" /> Some parent spans are outside this result page or were unobserved.</div>
+            }
+            <div class="table-scroll">
+                <table class="data-table waterfall-table">
+                    <thead><tr><th scope="col">Span</th><th scope="col">Relative timing</th><th scope="col" class="numeric">Duration</th></tr></thead>
+                    <tbody>
+                        @foreach (var line in _waterfall)
+                        {
+                            <tr>
+                                <td><strong class="table-main">@line.Event.Name</strong>
+                                    <small class="table-secondary mono">Span @Presentation.Id(line.Event.SpanId ?? "")</small>
+                                    @if (line.Event.ParentSpanId is { Length: > 0 } parent)
+                                    {
+                                        <small class="table-secondary mono">Parent @Presentation.Id(parent)</small>
+                                    }
+                                </td>
+                                <td>
+                                    <svg class="waterfall-track" viewBox="0 0 1000 24" preserveAspectRatio="none" role="img"
+                                         aria-label="@($"Starts at {Presentation.Duration(line.OffsetMs)} and lasts {Presentation.Duration(line.Event.DurationMs)}")">
+                                        <rect class="waterfall-span @Presentation.Tone(line.Event.Outcome)" x="@F(line.OffsetMs / _traceDuration * 1000)" y="4" height="16"
+                                              width="@F(Math.Max(1, line.Event.DurationMs!.Value / _traceDuration * 1000))" rx="3" fill="currentColor" />
+                                    </svg>
+                                </td>
+                                <td class="numeric">@Presentation.Duration(line.Event.DurationMs)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+    <section class="panel">
+        <div class="panel-head"><div><h2>Correlated events</h2><p class="mono">@TraceId</p></div></div>
+        @if (_events.Length == 0) { <DataState IconName="traces" EmptyTitle="No matching events" /> }
+        else { <EventTable Events="_events" Scope="Scope" /> }
+        <Pager Count="_events.Length" Offset="Skip" Link="PageLink" />
+    </section>
+}
+else
+{
+    var traces = _events.Where(entry => !string.IsNullOrWhiteSpace(entry.TraceId))
+        .GroupBy(entry => (entry.Application, entry.Environment, entry.TraceId));
+    <section class="panel">
+        <div class="panel-head"><div><h2>Traces on this event page</h2><p>IDs reported by the most recent telemetry events.</p></div></div>
+        @if (!traces.Any())
+        {
+            <DataState IconName="traces" EmptyTitle="No trace IDs on this page" EmptyText="Try an exact trace ID or browse the next events." />
+        }
+        else
+        {
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead><tr><th scope="col">Trace ID</th><th scope="col">Application</th><th scope="col">Last observed (UTC)</th><th scope="col" class="numeric">Events on page</th></tr></thead>
+                    <tbody>
+                        @foreach (var trace in traces)
+                        {
+                            <tr>
+                                <td><a class="mono record-link" href="@Scope.For(trace.Key.Application, trace.Key.Environment).Url("traces", ("traceId", trace.Key.TraceId))">@trace.Key.TraceId</a></td>
+                                <td>@AppLabel(trace.Key.Application)<small class="table-secondary">@Presentation.Title(trace.Key.Environment)</small></td>
+                                <td>@Presentation.ShortDate(trace.Max(entry => entry.OccurredAt))</td>
+                                <td class="numeric">@Presentation.Count(trace.Count())</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        <Pager Count="_events.Length" Offset="Skip" Link="PageLink" />
+    </section>
+}
+
+@code {
+    [SupplyParameterFromQuery] public string? TraceId { get; set; }
+    private string? _search;
+    private TelemetryEvent[] _events = [];
+    private WaterfallLine[] _waterfall = [];
+    private double _traceDuration;
+    private (string, string?)[] Filters => [("traceId", TraceId)];
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        _search = TraceId;
+        var events = await Api.GetAsync<TelemetryEvent[]>(Scope.Url("events", ("traceId", TraceId), ("limit", "50"),
+            ("offset", Skip.ToString(CultureInfo.InvariantCulture))), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        _events = events;
+
+        var timed = events.Where(entry => !string.IsNullOrEmpty(entry.SpanId) && entry.DurationMs is >= 0)
+            .DistinctBy(entry => entry.SpanId)
+            .Select(entry => (Event: entry, Start: entry.OccurredAt.AddMilliseconds(-entry.DurationMs!.Value)))
+            .OrderBy(item => item.Start).ToArray();
+        if (timed.Length == 0)
+        {
+            _waterfall = [];
+            return;
+        }
+
+        var first = timed[0].Start;
+        var spanIds = timed.Select(item => item.Event.SpanId).ToHashSet();
+        _traceDuration = Math.Max(1, (timed.Max(item => item.Event.OccurredAt) - first).TotalMilliseconds);
+        _waterfall = timed.Select(item => new WaterfallLine(item.Event, (item.Start - first).TotalMilliseconds,
+            !string.IsNullOrEmpty(item.Event.ParentSpanId) && !spanIds.Contains(item.Event.ParentSpanId))).ToArray();
+    }
+
+    private void Search() => Navigation.NavigateTo(Scope.Url("traces", ("traceId", _search?.Trim())));
+    private string PageLink(int offset) => Scope.Url("traces", ("traceId", TraceId), ("offset", offset.ToString(CultureInfo.InvariantCulture)));
+    private static string F(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
+    private sealed record WaterfallLine(TelemetryEvent Event, double OffsetMs, bool ParentMissing);
+}

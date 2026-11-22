@@ -1,0 +1,83 @@
+@page "/dependencies"
+@inherits ScopedPage
+
+<PageTitle>API explorer · PulseOps</PageTitle>
+<PageHeader Title="API explorer" Description="Inspect request volume, status, and latency for the endpoints observed by browsers." Section="Explore" />
+<ScopeBar Scope="Scope" Updating="Loading" Refresh="RefreshAsync" Extra="Filters" />
+@if (Error is not null || UpdatedAt is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else if (!string.IsNullOrEmpty(Name))
+{
+    <section class="panel">
+        <div class="panel-head"><div><h2>@Name</h2><p>Most recently observed requests. Times shown in UTC.</p></div>
+            <a class="subtle-link" href="@Scope.Url("dependencies")">All endpoints</a>
+        </div>
+        @if (_events.Length == 0) { <DataState IconName="dependencies" EmptyTitle="No matching requests" /> }
+        else { <EventTable Events="_events" Scope="Scope" /> }
+        <Pager Count="_events.Length" Offset="Skip" Link="PageLink" />
+    </section>
+}
+else
+{
+    <section class="panel">
+        <div class="panel-head"><div><h2>Endpoint performance</h2><p>Open an endpoint to inspect its request events.</p></div></div>
+        @if (_endpoints.Length == 0)
+        {
+            <DataState IconName="dependencies" EmptyTitle="No API requests in scope" />
+        }
+        else
+        {
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead><tr><th scope="col">Endpoint alias</th><th scope="col" class="numeric">Requests</th>
+                        <th scope="col" class="numeric">Failures</th><th scope="col" class="numeric">Error rate</th>
+                        <th scope="col" class="numeric">P50</th><th scope="col" class="numeric">P95</th><th scope="col" class="numeric">P99</th>
+                    </tr></thead>
+                    <tbody>
+                        @foreach (var dependency in _endpoints)
+                        {
+                            <tr>
+                                <td><a class="record-link mono" href="@Scope.Url("dependencies", ("name", dependency.Name))">@dependency.Name</a></td>
+                                <td class="numeric">@Presentation.Count(dependency.Requests)</td>
+                                <td class="numeric">@Presentation.Count(dependency.Failures)</td>
+                                <td class="numeric @(dependency.Failures > 0 ? "text-danger" : null)">@Presentation.Percent(dependency.Failures, dependency.Requests)</td>
+                                <td class="numeric">@Presentation.Duration(dependency.P50)</td>
+                                <td class="numeric">@Presentation.Duration(dependency.P95)</td>
+                                <td class="numeric">@Presentation.Duration(dependency.P99)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        <Pager Count="_endpoints.Length" Offset="Skip" Link="PageLink" />
+    </section>
+}
+
+@code {
+    [SupplyParameterFromQuery] public string? Name { get; set; }
+    private TelemetryEvent[] _events = [];
+    private Dependency[] _endpoints = [];
+    private (string, string?)[] Filters => [("name", Name)];
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        var paging = ("offset", Skip.ToString(CultureInfo.InvariantCulture));
+        if (!string.IsNullOrWhiteSpace(Name))
+        {
+            var rows = await Api.GetAsync<TelemetryEvent[]>(Scope.Url("events", ("kind", "api"), ("name", Name), ("limit", "50"), paging), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            _events = rows;
+        }
+        else
+        {
+            var rows = await Api.GetAsync<Dependency[]>(Scope.Url("dependencies", ("limit", "50"), paging), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            _endpoints = rows;
+        }
+    }
+
+    private string PageLink(int offset) => Scope.Url("dependencies", ("name", Name), ("offset", offset.ToString(CultureInfo.InvariantCulture)));
+}

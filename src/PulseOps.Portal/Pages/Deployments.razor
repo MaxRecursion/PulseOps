@@ -1,0 +1,103 @@
+@page "/deployments"
+@inherits ScopedPage
+
+<PageTitle>Deployments · PulseOps</PageTitle>
+<PageHeader Title="Deployments" Description="Review release markers and compare observed reliability between application versions." Section="Explore" />
+<ScopeBar Scope="Scope" Updating="Loading" Refresh="RefreshAsync" Extra="Filters" />
+@if (Error is not null || UpdatedAt is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else
+{
+    @if (_comparison is { } comparison && Left is { } baseline && Right is { } candidate)
+    {
+        <section class="panel">
+            <div class="panel-head">
+                <div><h2>Release comparison</h2><p>Version-specific telemetry within the same selected time range.</p></div>
+                <a class="button" href="@Scope.Url("deployments")">Close comparison</a>
+            </div>
+            <div class="table-scroll">
+                <table class="data-table comparison-table">
+                    <thead><tr><th scope="col">Metric</th><th scope="col" class="numeric">Baseline · @baseline</th><th scope="col" class="numeric">Candidate · @candidate</th></tr></thead>
+                    <tbody>
+                        <tr><th scope="row">API requests</th><td class="numeric">@Presentation.Count(comparison.Left.Requests)</td><td class="numeric">@Presentation.Count(comparison.Right.Requests)</td></tr>
+                        <tr><th scope="row">API error rate</th><td class="numeric">@Presentation.Percent(comparison.Left.FailedRequests, comparison.Left.Requests)</td><td class="numeric">@Presentation.Percent(comparison.Right.FailedRequests, comparison.Right.Requests)</td></tr>
+                        <tr><th scope="row">P95 API latency</th><td class="numeric">@Presentation.Duration(comparison.Left.P95)</td><td class="numeric">@Presentation.Duration(comparison.Right.P95)</td></tr>
+                        <tr><th scope="row">Exception events</th><td class="numeric">@Presentation.Count(comparison.Left.Exceptions)</td><td class="numeric">@Presentation.Count(comparison.Right.Exceptions)</td></tr>
+                        <tr><th scope="row">Startup failures</th><td class="numeric">@Presentation.Count(comparison.Left.StartupFailures)</td><td class="numeric">@Presentation.Count(comparison.Right.StartupFailures)</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    }
+    <section class="panel">
+        <div class="panel-head"><div><h2>Release markers</h2><p>Deployments reported to PulseOps. Markers reflect UTC.</p></div></div>
+        @if (_releases.Length == 0)
+        {
+            <DataState IconName="deployments" EmptyTitle="No release markers" EmptyText="Report deployments from your build pipeline to compare release versions." />
+        }
+        else
+        {
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead><tr><th scope="col">Application</th><th scope="col">Version</th><th scope="col">Build</th>
+                        <th scope="col">Commit</th><th scope="col">Deployment time</th><th scope="col">Comparison</th>
+                    </tr></thead>
+                    <tbody>
+                        @foreach (var release in _releases)
+                        {
+                            var prior = _releases.FirstOrDefault(item => item.Application == release.Application && item.Environment == release.Environment &&
+                                item.Version != release.Version && item.DeployedAt < release.DeployedAt);
+                            <tr>
+                                <td>@AppLabel(release.Application)<small class="table-secondary">@Presentation.Title(release.Environment)</small></td>
+                                <td class="mono">@release.Version</td>
+                                <td class="mono">@(release.BuildId ?? "—")</td>
+                                <td class="mono" title="@release.CommitId">@(release.CommitId is { Length: > 0 } commit ? Presentation.Id(commit) : "—")</td>
+                                <td>@Presentation.ShortDate(release.DeployedAt)</td>
+                                <td>
+                                    @if (prior is not null)
+                                    {
+                                        var comparisonScope = Scope.For(release.Application, release.Environment) with { Version = null };
+                                        <a class="subtle-link" href="@comparisonScope.Url("deployments", ("left", prior.Version), ("right", release.Version))">Compare to @prior.Version</a>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        <Pager Count="_releases.Length" Offset="Skip" Link="PageLink" />
+    </section>
+}
+
+@code {
+    [SupplyParameterFromQuery] public string? Left { get; set; }
+    [SupplyParameterFromQuery] public string? Right { get; set; }
+
+    private Release[] _releases = [];
+    private (Overview Left, Overview Right)? _comparison;
+    private (string, string?)[] Filters => [("left", Left), ("right", Right)];
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        var markersTask = Api.GetAsync<Release[]>(Scope.Url("releases", ("limit", "50"),
+            ("offset", Skip.ToString(CultureInfo.InvariantCulture))), cancellationToken);
+        (Overview, Overview)? comparison = null;
+        if (!string.IsNullOrEmpty(Left) && !string.IsNullOrEmpty(Right) && Scope.Application is not null && Scope.Environment is not null)
+        {
+            var first = Api.GetAsync<Overview>((Scope with { Version = Left }).Url("overview"), cancellationToken);
+            var second = Api.GetAsync<Overview>((Scope with { Version = Right }).Url("overview"), cancellationToken);
+            await Task.WhenAll(markersTask, first, second);
+            comparison = (await first, await second);
+        }
+
+        var releases = await markersTask;
+        cancellationToken.ThrowIfCancellationRequested();
+        _releases = releases.OrderByDescending(item => item.DeployedAt).ToArray();
+        _comparison = comparison;
+    }
+
+    private string PageLink(int offset) => Scope.Url("deployments", Filters.Append(("offset", offset.ToString(CultureInfo.InvariantCulture))).ToArray());
+}

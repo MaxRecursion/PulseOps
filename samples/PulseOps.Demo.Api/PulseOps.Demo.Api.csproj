@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" />
+    <ProjectReference Include="../PulseOps.Demo.Blazor/PulseOps.Demo.Blazor.csproj" />
+  </ItemGroup>
+</Project>

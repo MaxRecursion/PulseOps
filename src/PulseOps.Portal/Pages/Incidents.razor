@@ -1,0 +1,59 @@
+@page "/incidents"
+@inherits ScopedPage
+
+<PageTitle>Incidents · PulseOps</PageTitle>
+<PageHeader Title="Incidents" Description="Triage detections, review the observed evidence, and record incident actions." Section="Workspace" />
+<ScopeBar Scope="Scope" Updating="Loading" Refresh="RefreshAsync" />
+@if (Error is not null || UpdatedAt is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else
+{
+    <section class="panel">
+        <div class="panel-head"><div><h2>Incident activity</h2><p>Ordered by the most recent recorded occurrence.</p></div></div>
+        @if (_rows.Length == 0)
+        {
+            <DataState IconName="check" EmptyTitle="No incident activity" EmptyText="Detections appear here after a configured rule matches." />
+        }
+        else
+        {
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead><tr>
+                        <th scope="col">Incident</th><th scope="col">Severity</th><th scope="col">Status</th>
+                        <th scope="col">Application</th><th scope="col">Last seen (UTC)</th><th scope="col" class="numeric">Occurrences</th>
+                    </tr></thead>
+                    <tbody>
+                        @foreach (var incident in _rows)
+                        {
+                            <tr>
+                                <td><a class="record-link" href="@Scope.For(incident.Application, incident.Environment).Url($"incidents/{incident.Id}")">@incident.Title</a>
+                                    <small class="table-secondary">@incident.Assignee</small></td>
+                                <td><Badge Text="@incident.Severity" Dot="true" /></td>
+                                <td><Badge Text="@incident.Status" /></td>
+                                <td><span>@AppLabel(incident.Application)</span><small class="table-secondary">@Presentation.Title(incident.Environment)</small></td>
+                                <td><time datetime="@incident.LastSeen.ToString("O")">@Presentation.ShortDate(incident.LastSeen)</time></td>
+                                <td class="numeric">@Presentation.Count(incident.Count)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        <Pager Count="_rows.Length" Offset="Skip" Link="PageLink" />
+    </section>
+}
+
+@code {
+    private Incident[] _rows = [];
+    protected override bool LiveRefresh => true;
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        var rows = await Api.GetAsync<Incident[]>(Scope.Url("incidents", ("limit", "50"), ("offset", Skip.ToString(CultureInfo.InvariantCulture))), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        _rows = rows;
+    }
+
+    private string PageLink(int offset) => Scope.Url("incidents", ("offset", offset.ToString(CultureInfo.InvariantCulture)));
+}

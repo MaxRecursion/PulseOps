@@ -1,0 +1,50 @@
+@page "/monitors"
+@inherits ScopedPage
+
+<PageTitle>Monitors · PulseOps</PageTitle>
+<PageHeader Title="Monitors" Description="Scheduled latency, no-data and release regression monitors evaluated from processed telemetry." Section="Workspace" />
+<ScopeFilter Scope="Scope" Updating="Loading" Refresh="RefreshAsync" />
+@if (Error is not null || UpdatedAt is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else if (_monitors.Length == 0)
+{
+    <section class="panel">
+        <div class="panel-head"><div><h2>Monitor status</h2><p>No monitor is defined for the selected scope.</p></div></div>
+        <DataState IconName="monitors" EmptyTitle="No monitors in this scope"
+                   EmptyText="Monitors come from the PulseOps configuration file (PulseOps:Monitors) or from proposals approved in Change control." />
+        @if (Context.CanPropose || Context.CanAdminister)
+        {
+            <div class="panel-footer"><a class="button" href="@Scope.Url("administration")">Open Change control</a></div>
+        }
+    </section>
+}
+else
+{
+    <section class="stat-grid" aria-label="Monitor states">
+        <StatCard Label="Alerting" Value="@Presentation.Count(Count("Alert"))" Glyph="incidents" Description="Breached at the last evaluation" Tone="orange" />
+        <StatCard Label="Insufficient data" Value="@Presentation.Count(Count("InsufficientData"))" Glyph="info" Description="Too few samples to decide" Tone="blue" />
+        <StatCard Label="Healthy" Value="@Presentation.Count(Count("OK"))" Glyph="check" Description="Within threshold at last evaluation" Tone="teal" />
+        <StatCard Label="Pending or disabled" Value="@Presentation.Count(Count("Pending") + Count("Disabled"))" Glyph="clock" Description="Awaiting first evaluation or switched off" />
+    </section>
+    <section class="panel">
+        <div class="panel-head"><div><h2>Monitor status</h2><p>Alerting monitors first. Latency in milliseconds, no-data in minutes since the last signal, regression as failure rate.</p></div></div>
+        <MonitorTable Monitors="_monitors" Scope="Scope" />
+    </section>
+}
+
+@code {
+    private MonitorStatus[] _monitors = [];
+    protected override bool LiveRefresh => true;
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        var monitors = await Api.GetAsync(PortalApi.Query("monitors", ("application", Application), ("environment", Environment)),
+            AdminJson.Default.MonitorStatusArray, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        _monitors = monitors;
+    }
+
+    private long Count(string state) => _monitors.LongCount(monitor => monitor.State == state);
+}

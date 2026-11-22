@@ -1,0 +1,60 @@
+@page "/logs"
+@inherits ScopedPage
+
+<PageTitle>Logs · PulseOps</PageTitle>
+<PageHeader Title="Event explorer" Description="Search structured telemetry by event type, alias, session, or trace." Section="Explore" />
+<ScopeBar Scope="Scope" Updating="Loading" Refresh="RefreshAsync" Extra="Filters" />
+<form class="search-filters" @onsubmit="Search" @onsubmit:preventDefault>
+    <label class="query-field">Search expression
+        <input class="mono" type="search" maxlength="512" placeholder="Example: kind:api AND status:>=500" @bind="_query" />
+        <small>Use AND, OR, NOT, and parentheses. Field filters below also apply.</small>
+    </label>
+    <label>Event type
+        <select @bind="_kind">
+            <option value="">All event types</option>
+            @foreach (var item in EventKinds.All) { <option value="@item.Value">@item.Label</option> }
+        </select>
+    </label>
+    <label>Event alias <input type="search" maxlength="100" placeholder="Exact event alias" @bind="_name" /></label>
+    <label>Session ID <input type="search" maxlength="64" placeholder="Exact session ID" @bind="_session" /></label>
+    <label>Trace ID <input type="search" maxlength="32" placeholder="Exact trace ID" @bind="_trace" /></label>
+    <button class="button primary" type="submit"><Icon Name="search" Size="17" /> Search</button>
+    @if (Filters.Any(filter => !string.IsNullOrEmpty(filter.Item2))) { <a class="button" href="@Scope.Url("logs")">Clear</a> }
+</form>
+@if (Error is not null || UpdatedAt is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else
+{
+    <section class="panel">
+        <div class="panel-head"><div><h2>Matching events</h2><p>Most recent events in the selected scope.</p></div></div>
+        @if (_events.Length == 0) { <DataState IconName="logs" EmptyTitle="No matching events" /> }
+        else { <EventTable Events="_events" Scope="Scope" /> }
+        <Pager Count="_events.Length" Offset="Skip" Link="PageLink" />
+    </section>
+}
+
+@code {
+    [SupplyParameterFromQuery] public string? Kind { get; set; }
+    [SupplyParameterFromQuery] public string? Name { get; set; }
+    [SupplyParameterFromQuery] public string? SessionId { get; set; }
+    [SupplyParameterFromQuery] public string? TraceId { get; set; }
+    [SupplyParameterFromQuery(Name = "q")] public string? Query { get; set; }
+    private TelemetryEvent[] _events = [];
+    private string? _kind, _name, _session, _trace, _query;
+    private (string, string?)[] Filters => [("q", Query), ("kind", Kind), ("name", Name), ("sessionId", SessionId), ("traceId", TraceId)];
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        (_kind, _name, _session, _trace, _query) = (Kind, Name, SessionId, TraceId, Query);
+        var query = Filters.Append(("limit", "50")).Append(("offset", Skip.ToString(CultureInfo.InvariantCulture))).ToArray();
+        var events = await Api.GetAsync<TelemetryEvent[]>(Scope.Url("events", query), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        _events = events;
+    }
+
+    private void Search() => Navigation.NavigateTo(Scope.Url("logs", ("q", _query?.Trim()), ("kind", _kind?.Trim()), ("name", _name?.Trim()),
+        ("sessionId", _session?.Trim()), ("traceId", _trace?.Trim())));
+    private string PageLink(int offset) => Scope.Url("logs", Filters.Append(("offset", offset.ToString(CultureInfo.InvariantCulture))).ToArray());
+}

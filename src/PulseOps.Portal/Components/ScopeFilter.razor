@@ -1,0 +1,57 @@
+@inject NavigationManager Navigation
+@* Application and environment only: for pages whose own filters replace the shared time range and version. *@
+<div class="scope-bar scope-filter" role="group" aria-label="Application scope">
+    <label class="scope-field">
+        <span>Application</span>
+        <select value="@(Scope.Application ?? "")" @onchange="ChangeApplication">
+            <option value="">All applications</option>
+            @foreach (var app in Context.Scopes.DistinctBy(scope => scope.Application).OrderBy(scope => scope.Label))
+            {
+                <option value="@app.Application">@app.Label</option>
+            }
+        </select>
+    </label>
+    <label class="scope-field">
+        <span>Environment</span>
+        <select value="@(Scope.Environment ?? "")" @onchange="ChangeEnvironment">
+            <option value="">All environments</option>
+            @foreach (var environment in Environments)
+            {
+                <option value="@environment">@Presentation.Title(environment)</option>
+            }
+        </select>
+    </label>
+    <button type="button" class="button icon-button scope-refresh" title="Refresh data" aria-label="Refresh data" disabled="@Updating" @onclick="Refresh">
+        <Icon Name="refresh" Size="17" Class="@(Updating ? "spin" : null)" />
+    </button>
+</div>
+
+@code {
+    [CascadingParameter] public PortalContext Context { get; set; } = null!;
+    [Parameter, EditorRequired] public ViewScope Scope { get; set; } = null!;
+    [Parameter] public bool Updating { get; set; }
+    [Parameter] public EventCallback Refresh { get; set; }
+    [Parameter] public (string Key, string? Value)[] Extra { get; set; } = [];
+
+    private IEnumerable<string> Environments => Context.Scopes
+        .Where(scope => Scope.Application is null || scope.Application == Scope.Application)
+        .Select(scope => scope.Environment).Distinct().Order();
+
+    private void ChangeApplication(ChangeEventArgs args)
+    {
+        var application = BlankToNull(args.Value?.ToString());
+        var environment = Context.Scopes.Any(scope => (application is null || scope.Application == application) && scope.Environment == Scope.Environment)
+            ? Scope.Environment : null;
+        Update(Scope with { Application = application, Environment = environment });
+    }
+
+    private void ChangeEnvironment(ChangeEventArgs args) => Update(Scope with { Environment = BlankToNull(args.Value?.ToString()) });
+
+    private void Update(ViewScope scope)
+    {
+        var path = Navigation.ToBaseRelativePath(Navigation.Uri).Split('?', '#')[0];
+        Navigation.NavigateTo(scope.Url(path, Extra));
+    }
+
+    private static string? BlankToNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+}

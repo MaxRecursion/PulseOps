@@ -1,0 +1,65 @@
+@page "/exceptions"
+@inherits ScopedPage
+
+<PageTitle>Exceptions · PulseOps</PageTitle>
+<PageHeader Title="Exception explorer" Description="Review exception categories and open the events, sessions, and traces behind them." Section="Explore" />
+<ScopeBar Scope="Scope" Updating="Loading" Refresh="RefreshAsync" Extra="Filters" />
+<form class="search-filters" @onsubmit="Search" @onsubmit:preventDefault>
+    <label>Exception alias <input type="search" maxlength="100" placeholder="Exact exception alias" @bind="_search" /></label>
+    <button class="button primary" type="submit"><Icon Name="search" Size="17" /> Find exceptions</button>
+    @if (!string.IsNullOrEmpty(Name)) { <a class="button" href="@Scope.Url("exceptions")">Clear</a> }
+</form>
+@if (Error is not null || UpdatedAt is null)
+{
+    <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else
+{
+    @if (_events.Length > 0 && string.IsNullOrWhiteSpace(Name))
+    {
+        <section class="panel">
+            <div class="panel-head"><div><h2>Groups on this page</h2><p>Occurrences grouped by exception alias in the displayed event page.</p></div></div>
+            <div class="table-scroll">
+                <table class="data-table">
+                    <thead><tr><th scope="col">Alias</th><th scope="col">Application</th><th scope="col">Latest observed (UTC)</th><th scope="col" class="numeric">Occurrences</th></tr></thead>
+                    <tbody>
+                        @foreach (var group in _events.GroupBy(entry => (entry.Application, entry.Environment, entry.Name)).OrderByDescending(group => group.Count()))
+                        {
+                            <tr>
+                                <td><a class="record-link" href="@Scope.For(group.Key.Application, group.Key.Environment).Url("exceptions", ("name", group.Key.Name))">@group.Key.Name</a></td>
+                                <td>@AppLabel(group.Key.Application)<small class="table-secondary">@Presentation.Title(group.Key.Environment)</small></td>
+                                <td>@Presentation.ShortDate(group.Max(entry => entry.OccurredAt))</td>
+                                <td class="numeric">@Presentation.Count(group.Count())</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    }
+    <section class="panel">
+        <div class="panel-head"><div><h2>Exception events</h2><p>Most recent occurrences in scope.</p></div></div>
+        @if (_events.Length == 0) { <DataState IconName="exceptions" EmptyTitle="No matching exceptions" /> }
+        else { <EventTable Events="_events" Scope="Scope" /> }
+        <Pager Count="_events.Length" Offset="Skip" Link="PageLink" />
+    </section>
+}
+
+@code {
+    [SupplyParameterFromQuery] public string? Name { get; set; }
+    private TelemetryEvent[] _events = [];
+    private string? _search;
+    private (string, string?)[] Filters => [("name", Name)];
+
+    protected override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        _search = Name;
+        var events = await Api.GetAsync<TelemetryEvent[]>(Scope.Url("events", ("kind", "error"), ("name", Name),
+            ("limit", "50"), ("offset", Skip.ToString(CultureInfo.InvariantCulture))), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        _events = events;
+    }
+
+    private void Search() => Navigation.NavigateTo(Scope.Url("exceptions", ("name", _search?.Trim())));
+    private string PageLink(int offset) => Scope.Url("exceptions", ("name", Name), ("offset", offset.ToString(CultureInfo.InvariantCulture)));
+}

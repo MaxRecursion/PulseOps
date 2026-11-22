@@ -1,0 +1,68 @@
+<section class="panel" aria-labelledby="audit-log-title">
+    <div class="panel-head">
+        <div>
+            <h2 id="audit-log-title">Audit log</h2>
+            <p>Append-only, hash-chained record of proposals, decisions, expiries and exports. Newest first. Times are UTC.</p>
+        </div>
+        <a class="button" href="api/v1/admin/audit/export?days=30" download>
+            <Icon Name="download" Size="16" /> Export NDJSON <span class="sr-only">audit entries from the last 30 days</span>
+        </a>
+    </div>
+    @{ var chain = Result.Chain; }
+    <div class="chain-status" role="@(chain.Verified ? null : "alert")">
+        <Badge Text="@(chain.Verified ? "Verified" : $"Broken at seq {chain.BrokenAtSeq?.ToString(CultureInfo.InvariantCulture) ?? "?"}")"
+               Tone="@(chain.Verified ? "good" : "danger")" Dot="true" />
+        <span>@Presentation.Count(chain.Entries) entries</span>
+        @if (chain.HeadHash is { Length: > 0 } head)
+        {
+            <span>Head <span class="mono" title="@head">@Presentation.Id(head)</span></span>
+        }
+        @if (!chain.Verified)
+        {
+            <span class="text-danger">Entries from this sequence onward fail hash verification. Preserve the database and investigate before relying on them.</span>
+        }
+    </div>
+    @if (Result.Entries.Length == 0)
+    {
+        <DataState IconName="archive" EmptyTitle="No audit entries" EmptyText="Proposals, decisions and exports are recorded here." />
+    }
+    else
+    {
+        <div class="table-scroll">
+            <table class="data-table audit-table">
+                <thead><tr>
+                    <th scope="col" class="numeric">Seq</th><th scope="col">Time (UTC)</th><th scope="col">Actor</th><th scope="col">Action</th>
+                    <th scope="col">Scope</th><th scope="col">Target</th><th scope="col">Detail</th><th scope="col">Hash</th>
+                </tr></thead>
+                <tbody>
+                    @foreach (var entry in Result.Entries)
+                    {
+                        <tr>
+                            <td class="numeric">@entry.Seq</td>
+                            <td><time datetime="@entry.At.ToString("O")" title="@Presentation.Date(entry.At)">@Presentation.ShortDate(entry.At)</time></td>
+                            <td class="mono">@entry.Actor</td>
+                            <td><span class="mono">@entry.Action</span></td>
+                            <td>@ScopeLabel(entry.Application, entry.Environment)</td>
+                            <td class="mono">@(string.IsNullOrEmpty(entry.Target) ? "—" : entry.Target)</td>
+                            <td class="wrap-cell">@entry.Detail</td>
+                            <td class="mono" title="@entry.Hash">@Presentation.Id(entry.Hash)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+    <Pager Offset="Offset" Count="Result.Entries.Length" Link="Link" PageSize="PageSize" />
+</section>
+
+@code {
+    public const int PageSize = 100;
+
+    [CascadingParameter] public PortalContext Context { get; set; } = null!;
+    [Parameter, EditorRequired] public AuditResult Result { get; set; } = null!;
+    [Parameter, EditorRequired] public int Offset { get; set; }
+    [Parameter, EditorRequired] public Func<int, string> Link { get; set; } = null!;
+
+    private string ScopeLabel(string application, string environment) => application.Length == 0 ? "Platform"
+        : $"{Context.Scopes.FirstOrDefault(scope => scope.Application == application)?.Label ?? application} · {Presentation.Title(environment)}";
+}
