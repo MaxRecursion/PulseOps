@@ -94,8 +94,19 @@ function Read-PulseManifest {
     }
 
     $hashes = @{}
+    $releasePaths = @(
+        '(?:server|deployment/(?:windows|iis)|docs)/(?:[^/:\\]+/)*[^/:\\]+'
+        'deployment/teamcity/(?:README\.md|Mark-Release\.ps1)'
+        'deployment/staging/(?:StagingSmoke\.cs|packages\.lock\.json)'
+        'deployment/performance/(?:(?:Benchmark|Soak)\.cs|packages\.lock\.json)'
+        'deployment/staging-tools/(?:smoke/StagingSmoke|soak/Soak)\.(?:dll|deps\.json|runtimeconfig\.json)'
+        'third_party/datacat/(?:LICENSE|NOTICE)'
+        '(?:README|ARCHITECTURE|IMPLEMENTATION_STATUS)\.md'
+        'global\.json|Directory\.(?:Build|Packages)\.props'
+    )
+    $allowedPath = '^(?:' + ($releasePaths -join '|') + ')$'
     foreach ($entry in $manifest.files) {
-        if ($entry.path -notmatch '^(?:(?:server|deployment/(?:windows|iis)|docs)/(?:[^/:\\]+/)*[^/:\\]+|deployment/teamcity/README\.md|IMPLEMENTATION_STATUS\.md)$' -or
+        if ($entry.path -notmatch $allowedPath -or
             $entry.path.Split('/') -contains '..' -or $entry.path.Split('/') -contains '.' -or
             $entry.sha256 -notmatch '^[A-Fa-f0-9]{64}$' -or $hashes.ContainsKey($entry.path)) {
             throw 'Invalid path, duplicate file, or invalid file digest in manifest.'

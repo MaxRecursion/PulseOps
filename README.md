@@ -6,6 +6,27 @@ The standard deployment is a single ASP.NET Core process that serves the API, st
 
 Repository: <https://github.com/MaxRecursion/PulseOps>
 
+## Quick start
+
+From the repository root on macOS or Linux, start a labeled local demo with .NET 10 and a fresh SQLite database.
+
+```sh
+dotnet restore PulseOps.sln --locked-mode
+dotnet build PulseOps.sln -c Release --no-restore
+demo_dir=$(mktemp -d)
+ASPNETCORE_ENVIRONMENT=Development PulseOps__Demo=true PulseOps__DatabasePath="$demo_dir/pulseops.db" \
+  dotnet run --project src/PulseOps.Server -c Release --no-build --no-launch-profile -- --urls http://localhost:5080
+```
+
+Open the [dashboard](http://localhost:5080/) once [readiness](http://localhost:5080/health/ready) returns `{"status":"ready"}`. SQLite is included. The dashboard can be explored immediately. To generate an incident, start the sample in a second terminal, open the [finance workspace](http://localhost:5091/) and run the **HTTP 503** scenario.
+
+```sh
+ASPNETCORE_ENVIRONMENT=Development \
+  dotnet run --project samples/PulseOps.Demo.Api -c Release --no-build --no-launch-profile -- --urls http://localhost:5091
+```
+
+Use the [PowerShell and step-by-step setup](#step-by-step-local-setup) on Windows. The [operator handbook](docs/PulseOps-Operator-Guide.docx) covers first use, production installation, monitoring and recovery. The [Windows runbook](docs/Operations.md) contains the protected configuration and deployment commands.
+
 ## Feature overview
 
 - Dashboard, dependencies, incidents, sessions, traces, exceptions and structured event views
@@ -17,7 +38,9 @@ Repository: <https://github.com/MaxRecursion/PulseOps>
 - OIDC authentication, role-based authorization and exact group-to-scope mapping
 - Machine-scoped telemetry intake for approved server-side relays
 - SQLite WAL, migrations, retention, durable intake receipts and native backup/restore
-- Durably delivered scoped HTTPS webhooks
+- Durable notification outbox for scoped HTTPS webhooks and SMTP
+- Hourly and daily UTC history, latency, no-data and release-regression monitors
+- Approved policy changes, maintenance windows and hash-chained audit export
 - Standalone Blazor WebAssembly SDK and early browser bootstrap
 - Instrumented finance demo with success and fault scenarios
 - Optional detached Windows worker process
@@ -51,7 +74,7 @@ flowchart LR
     Worker <-->|Atomic processing and outbox| SQLite
     SQLite --> APIs[Scoped query APIs]
     APIs --> Portal[Blazor support portal]
-    Worker --> Webhook[Approved HTTPS webhook]
+    Worker --> Webhook[Approved webhook or SMTP relay]
     Operators[OIDC operators] --> Portal
     Probe[Scheduled probes] --> Intake
 ```
@@ -276,27 +299,30 @@ Important options include:
 | `PulseOps:MinimumFreeMegabytes` | Free-disk guard threshold |
 | `PulseOps:Auth` | OIDC authority, client and claim settings |
 | `PulseOps:Scopes` | Application/environment scope and ingest authorization |
-| `PulseOps:Rules` | Windowed incident detection policies |
+| `PulseOps:Rules` | Windowed failure detection policies |
+| `PulseOps:Monitors` | Scheduled latency, no-data and release comparisons |
+| `PulseOps:RollupHourlyDays` / `RollupRetentionDays` | UTC hourly and daily history windows |
+| `PulseOps:ErrorRetentionDays` | Optional exception-event retention |
 | `PulseOps:DataProtectionPath` | Persistent ASP.NET Data Protection keys |
 
 Never place OIDC secrets or machine ingest tokens in source control or public configuration. Use host environment variables or a protected production configuration file.
 
 ## SQLite database operations
 
-The server exposes maintenance modes through command-line arguments. Stop normal web processing before restore or destructive operations.
+For a disposable local database, set `PulseOps__DatabasePath` to its absolute path in this shell before running these commands. For production, use the Windows wrapper and protected configuration described in the recovery guide. Stop all database users before restoring and verify the snapshot first.
 
 ```bash
 # Apply migrations
-dotnet run --project src/PulseOps.Server -- migrate
+dotnet run --project src/PulseOps.Server --no-launch-profile -- --migrate
 
 # Create a native SQLite backup
-dotnet run --project src/PulseOps.Server -- backup /absolute/path/pulseops-backup.db
+dotnet run --project src/PulseOps.Server --no-launch-profile -- --backup /absolute/path/pulseops-backup.db
 
 # Verify a backup
-dotnet run --project src/PulseOps.Server -- verify-backup /absolute/path/pulseops-backup.db
+dotnet run --project src/PulseOps.Server --no-launch-profile -- --verify-backup /absolute/path/pulseops-backup.db
 
 # Restore a backup
-dotnet run --project src/PulseOps.Server -- restore /absolute/path/pulseops-backup.db
+dotnet run --project src/PulseOps.Server --no-launch-profile -- --restore /absolute/path/pulseops-backup.db
 ```
 
 Use local NTFS or equivalent local filesystem storage. Do not place SQLite on a network share or distributed volume. Back up and restore only through the application commands or a coordinated database snapshot procedure.
@@ -307,7 +333,7 @@ The web process runs the embedded worker by default. To run a detached worker, c
 
 ```bash
 ASPNETCORE_ENVIRONMENT=Development \
-  dotnet run --project src/PulseOps.Server --no-build -- worker --urls http://localhost:5081
+  dotnet run --project src/PulseOps.Server --no-build --no-launch-profile -- --worker
 ```
 
 In a Windows deployment, the same executable can be registered as a second worker service. Both processes must use the same database and a one-host deployment boundary.
@@ -355,7 +381,7 @@ PulseOps provides Windows deployment and recovery tooling for a dedicated Window
 1. Provision .NET 10 ASP.NET Core Runtime, PowerShell 7.4 and local NTFS storage.
 2. Install a trusted TLS certificate.
 3. Register a confidential OIDC web client.
-4. Stage and verify a signed reviewed release.
+4. Verify the release manifest digest obtained from your trusted build record and verify each file before staging.
 5. Create protected `appsettings.Production.json` configuration.
 6. Validate and migrate the database.
 7. Register the Windows Service or IIS application.
@@ -426,6 +452,7 @@ In production, do not treat live-only health as sufficient for load-balancer rou
 - [Architecture and DataCat parity](ARCHITECTURE.md)
 - [Local performance benchmark](docs/Performance.md)
 - [Windows operations and recovery](docs/Operations.md)
+- [Staging acceptance and capacity tests](docs/Staging.md)
 - [Blazor SDK integration](docs/SDK.md)
 - [Telemetry and storage contract](docs/Telemetry.md)
 - [Security threat model](docs/Security.md)

@@ -140,6 +140,24 @@ public sealed class StorageTests
     }
 
     [Test]
+    public void BackupPreflightRejectsAnIntactSnapshotForAnotherSchema()
+    {
+        var snapshot = Path.Combine(_directory, "older-schema.db");
+        _storage.Backup(snapshot);
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+                   new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = snapshot }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA user_version = 4";
+            command.ExecuteNonQuery();
+        }
+
+        Assert.DoesNotThrow(() => Storage.VerifyBackup(snapshot));
+        Assert.Throws<InvalidOperationException>(() => Storage.VerifyBackup(snapshot, requireCurrentSchema: true));
+    }
+
+    [Test]
     public void WebhookTransitionOutboxSurvivesRetryAndLeasesAcrossWorkers()
     {
         _options.Webhooks = [new() { Name = "internal", Url = "https://example.invalid/alerts" }];

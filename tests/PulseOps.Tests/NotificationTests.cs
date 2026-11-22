@@ -164,12 +164,12 @@ public sealed partial class NotificationTests
     }
 
     [Test]
-    public async Task TransientFailuresStopAfterSixAttempts()
+    public async Task TransientFailuresRemainPendingUntilTheRouteRecovers()
     {
         _smtp.DataReply = "451 4.3.0 Try again later";
         OpenIncident();
         var worker = Worker();
-        for (int attempt = 1; attempt <= NotificationWorker.MaximumAttempts; attempt++)
+        for (int attempt = 1; attempt <= 7; attempt++)
         {
             _clock.Now = Now.AddHours(attempt);
             Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.True, $"Attempt {attempt} is due.");
@@ -177,11 +177,14 @@ public sealed partial class NotificationTests
         var delivery = Delivery("finance-oncall");
         Assert.Multiple(() =>
         {
-            Assert.That((delivery.State, delivery.Attempts), Is.EqualTo(("failed", 6L)));
-            Assert.That(_logger.Lines.Last(), Does.Contain("failed").And.Contain("SMTP status 451"));
+            Assert.That((delivery.State, delivery.Attempts), Is.EqualTo(("pending", 7L)));
+            Assert.That(_logger.Lines.Last(), Does.Contain("will be retried").And.Contain("SMTP status 451"));
         });
-        _clock.Now = Now.AddDays(2);
-        Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.False);
+
+        _smtp.DataReply = "250 2.0.0 Queued";
+        _clock.Now = delivery.NextAttempt;
+        Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.True);
+        Assert.That((Delivery("finance-oncall").State, Delivery("finance-oncall").Attempts), Is.EqualTo(("delivered", 8L)));
     }
 
     [Test]

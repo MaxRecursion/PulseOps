@@ -10,7 +10,7 @@ and writes JSON reports, logs, a transcript and SHA-256 checksums under a new re
 starts, stops or reconfigures services or IIS, and it never prints or stores credential values: harnesses read the machine
 tokens from the named environment variables themselves.
 
-Build the harnesses on the build agent, not on the staging host:
+The release archive includes the harnesses under deployment/staging-tools. To build them from source on a build agent:
   dotnet publish deployment/staging/StagingSmoke.cs -c Release -o <tools>\smoke
   dotnet publish deployment/performance/Soak.cs -c Release -o <tools>\soak
 The staging scope must allowlist the synthetic event name (default smoke-check). See docs/Staging.md.
@@ -28,7 +28,7 @@ param(
     [Parameter(Mandatory)] [ValidatePattern('^[a-z0-9][a-z0-9-]{0,39}$')] [string] $Environment,
     [Parameter(Mandatory)] [ValidatePattern('^[A-Za-z_][A-Za-z0-9_]{0,127}$')] [string] $TokenVariable,
     [ValidatePattern('^[A-Za-z_][A-Za-z0-9_]{0,127}$')] [string] $OtherTokenVariable,
-    [Parameter(Mandatory)] [string] $ToolsDirectory,
+    [string] $ToolsDirectory = (Join-Path $PSScriptRoot '../staging-tools'),
     [Parameter(Mandatory)] [string] $ResultsDirectory,
     [ValidateRange(1, 1440)] [int] $SoakMinutes = 30,
     [ValidateRange(1, 5000)] [int] $SteadyRate = 200,
@@ -64,7 +64,7 @@ function Find-Harness {
     param([string] $Name)
     $candidates = @(Get-ChildItem -LiteralPath $ToolsDirectory -Filter "$Name.dll" -File -Recurse -ErrorAction SilentlyContinue)
     if ($candidates.Count -ne 1) {
-        throw "Expected exactly one $Name.dll under $ToolsDirectory. Publish it with dotnet publish (see docs/Staging.md)."
+        throw "Expected exactly one $Name.dll under $ToolsDirectory. Extract the complete release archive or supply -ToolsDirectory (see docs/Staging.md)."
     }
     return $candidates[0].FullName
 }

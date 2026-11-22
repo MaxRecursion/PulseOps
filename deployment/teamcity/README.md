@@ -13,6 +13,17 @@ pwsh -NoProfile -NonInteractive -File deployment/teamcity/Build.ps1 `
 
 The script restores, checks NuGet advisories, builds, runs solution tests, packs the Blazor SDK, and publishes the Windows server with the bundled WASM assets. Review the TRX results. Configure TeamCity's XML Report Processing to import `artifacts/**/tests/*.trx` as VSTest results. Publish the zip, `manifest.sha256`, SDK packages and test results as TeamCity artifacts. For validation evidence, also archive the approved vulnerability scan, full dependency inventory, and artifact-signing or attestation record. Authorize the expected manifest digest from trusted build provenance before deployment. [TeamCity TRX import](https://www.jetbrains.com/help/teamcity/xml-report-processing.html)
 
+The release ZIP contains the server under `server`, the setup and acceptance scripts under `deployment`, the operator guide at `docs/PulseOps-Operator-Guide.docx`, and the Markdown setup, recovery and staging guides. It includes the DataCat notices and the OFL notice for the portal fonts. The release manifest covers the documentation, scripts and staging harnesses along with the server.
+
+The staging runner needs the .NET 10 runtime and HTTPS access to the staging installation. From the extracted release directory, load the scoped machine credential into the named environment variable and run the following command. The wrapper locates the compiled smoke and soak tools in `deployment/staging-tools`. Use a new evidence directory for each run. The source and package locks are included for independent rebuilds. [Staging scope setup, test gates and evidence](../../docs/Staging.md)
+
+```powershell
+./deployment/windows/Invoke-StagingAcceptance.ps1 `
+    -BaseUrl 'https://pulseops-staging.internal.example' -Application staging-smoke `
+    -Environment staging -TokenVariable PULSEOPS_STAGING_TOKEN `
+    -ResultsDirectory 'C:\PulseOpsEvidence\release-acceptance' -SoakMinutes 60
+```
+
 Run the opt-in browser suite as a separate release gate with the two isolated demo hosts and approved Chromium. Leave the local simulation data off the production host. [Browser test setup](../../docs/SDK.md)
 
 ## Promote the SDK

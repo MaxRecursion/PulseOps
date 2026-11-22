@@ -704,6 +704,12 @@
           "Microsoft.AspNetCore.SignalR.Client": "[10.0.15, )"
         }
       },
+      "pulseops.sdk.blazor": {
+        "type": "Project",
+        "dependencies": {
+          "Microsoft.AspNetCore.Components.WebAssembly": "[10.0.15, )"
+        }
+      },
       "pulseops.server": {
         "type": "Project",
         "dependencies": {

@@ -38,7 +38,7 @@ if (arguments.Mode is "migrate" or "backup" or "restore" or "verify-backup" or "
         case "migrate": storage.Migrate(); break;
         case "backup": storage.Backup(arguments.Path!); break;
         case "restore": storage.Restore(arguments.Path!); break;
-        case "verify-backup": Storage.VerifyBackup(arguments.Path!); break;
+        case "verify-backup": Storage.VerifyBackup(arguments.Path!, requireCurrentSchema: true); break;
         case "export-audit":
             storage.AssertReady();
             var (exported, head) = storage.ExportAudit(arguments.Path!);
@@ -46,8 +46,12 @@ if (arguments.Mode is "migrate" or "backup" or "restore" or "verify-backup" or "
             break;
         case "replay-dead-letters":
             storage.AssertReady();
-            var (returned, duplicates) = storage.ReplayDeadLetters();
-            Console.WriteLine($"Returned {returned} dead-letter records to the inbox. Skipped {duplicates} already accepted again.");
+            var replay = storage.ReplayDeadLetters();
+            Console.WriteLine($"Returned {replay.Returned} dead-letter records to the inbox. " +
+                $"Skipped {replay.Duplicates} duplicates and deferred {replay.Deferred} for inbox capacity. " +
+                $"{replay.Remaining} records remain.");
+            if (replay.PausedForDisk)
+                Console.WriteLine("Replay paused because the configured free-space reserve is not available.");
             break;
     }
     Console.WriteLine($"PulseOps {arguments.Mode} completed.");
@@ -264,7 +268,8 @@ api.MapPost("/incidents/{id:guid}", async (Guid id, IncidentChange change, HttpC
         await live.Clients.Group("platform").SendAsync("Changed", ctx.RequestAborted);
     return Results.StatusCode(status);
 });
-api.MapGet("/platform", (Storage database) => database.PlatformHealth()).RequireAuthorization("administrator");
+api.MapGet("/platform", (Storage database, TimeProvider clock) => database.PlatformHealth(clock.GetUtcNow()))
+    .RequireAuthorization("administrator");
 RollupEndpoints.Map(api, options);
 MonitorEndpoints.Map(api, options);
 AdministrationEndpoints.Map(api, options);
@@ -286,6 +291,7 @@ static void ConfigureProcessing(IServiceCollection services, PlatformOptions set
     if (!run)
         return;
     services.AddHostedService<Processor>();
+    services.AddHostedService<MonitorWorker>();
     if (settings.Probes.Count > 0)
         services.AddHostedService<SyntheticChecks>();
     if (settings.Webhooks.Count > 0 || settings.EmailRoutes.Count > 0)

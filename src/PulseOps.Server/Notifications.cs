@@ -118,8 +118,6 @@ public sealed partial class Storage
 internal sealed class NotificationWorker(PlatformOptions options, Storage storage, IHttpClientFactory clients,
     TimeProvider clock, ILogger<NotificationWorker> logger, IAlertEmailSender? email = null) : BackgroundService
 {
-    internal const int MaximumAttempts = 6;
-
     protected override async Task ExecuteAsync(CancellationToken token)
     {
         using var client = clients.CreateClient("outbound");
@@ -202,16 +200,15 @@ internal sealed class NotificationWorker(PlatformOptions options, Storage storag
             retry = SmtpAlertEmailSender.IsTransient(exception);
             // Only the delivery id and the reply code are logged: SMTP replies and exception messages can quote recipients.
             logger.LogWarning("E-mail delivery {Delivery} {Outcome}. SMTP status {Status}.", delivery.Id,
-                retry && delivery.Attempt < MaximumAttempts ? "will be retried" : "failed", SmtpAlertEmailSender.ReplyCode(exception));
+                retry ? "will be retried" : "failed", SmtpAlertEmailSender.ReplyCode(exception));
         }
         Complete(delivery, sent, retry, TimeSpan.Zero);
     }
 
-    // Exponential backoff with jitter (about 10, 20, 40, 80 and 160 seconds), raised to a receiver's Retry-After and capped
-    // at one hour. After MaximumAttempts the delivery stays failed and is counted in platform health.
+    // Transient failures remain durable and retry with exponential backoff; permanent failures stay visible as failed.
     private void Complete(AlertDelivery delivery, bool sent, bool retry, TimeSpan guidance)
     {
-        retry &= !sent && delivery.Attempt < MaximumAttempts;
+        retry &= !sent;
         var delay = Math.Max(Math.Pow(2, Math.Min(8, delivery.Attempt)) * 5 + Random.Shared.Next(1, 6), guidance.TotalSeconds);
         storage.CompleteAlert(delivery, clock.GetUtcNow().AddSeconds(Math.Clamp(delay, 1, 3600)), sent, retry);
     }

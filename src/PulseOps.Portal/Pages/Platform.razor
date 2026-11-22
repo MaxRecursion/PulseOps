@@ -34,6 +34,7 @@ else
         <dl class="detail-facts">
             <div><dt>Last worker heartbeat</dt><dd>@(_health.WorkerHeartbeat is { } heartbeat ? Presentation.Date(heartbeat) : "No heartbeat recorded")</dd></div>
             <div><dt>Oldest pending item</dt><dd>@(_health.OldestPendingAt is { } waiting ? Presentation.Date(waiting) : "Inbox empty")</dd></div>
+            <div><dt>Expired raw telemetry</dt><dd>@(Presentation.Count(_health.ExpiredRawRows) + (_health.OldestExpiredRawAt is { } expired ? $" rows · oldest {Presentation.Date(expired)}" : " rows"))</dd></div>
             <div><dt>Rollup backfill remaining</dt><dd>@(_health.RollupBackfillRemaining == 0 ? "Complete" : Presentation.Count(_health.RollupBackfillRemaining) + " rows")</dd></div>
             <div><dt>Free disk on the database volume</dt><dd>@(_health.FreeDiskBytes is { } free ? DisplayBytes(free) : "Unavailable")</dd></div>
             <div><dt>Host working set</dt><dd>@DisplayBytes(_health.ProcessWorkingSetBytes)</dd></div>
@@ -60,6 +61,8 @@ else
             yield return "The processing worker has not reported within 90 seconds. Readiness reports unavailable until it does.";
         if (health.OldestPendingAt is { } oldest && now - oldest > TimeSpan.FromMinutes(5))
             yield return $"Processing backlog: the oldest pending item has waited {(int)(now - oldest).TotalMinutes} minutes.";
+        if (health.OldestExpiredRawAt is { } expired && now - expired > TimeSpan.FromMinutes(5))
+            yield return $"Raw retention is behind: {Presentation.Count(health.ExpiredRawRows)} expired events are awaiting deletion.";
         if (health.DeadLetters > 0)
             yield return "Some telemetry records were quarantined. Deploy a fix, then run the replay command described in the operations guide.";
         if (health.NotificationFailures > 0)

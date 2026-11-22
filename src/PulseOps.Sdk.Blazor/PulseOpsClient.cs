@@ -11,6 +11,13 @@ namespace PulseOps.Sdk.Blazor;
 
 public sealed class PulseOpsClient : IAsyncDisposable
 {
+    private enum BatchDisposition
+    {
+        Accepted,
+        Retry,
+        Rejected
+    }
+
     internal static readonly ActivitySource Activities = new("PulseOps.Sdk.Blazor");
     private readonly PulseOpsOptions _options;
     private readonly IJSRuntime _js;
@@ -254,14 +261,26 @@ public sealed class PulseOpsClient : IAsyncDisposable
                     if (events.Count == 0)
                         break;
 
-                    var accepted = false;
+                    BatchDisposition disposition;
                     try
                     {
-                        accepted = await SendBatchAsync(events, cancellationToken);
+                        disposition = await SendBatchAsync(events, cancellationToken);
                     }
-                    finally
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
-                        _buffer.Processed(events.Count, accepted);
+                        _buffer.Processed(events, accepted: false);
+                        throw;
+                    }
+
+                    if (disposition == BatchDisposition.Accepted)
+                        _buffer.Processed(events, accepted: true);
+                    else if (disposition == BatchDisposition.Rejected)
+                        _buffer.Processed(events, accepted: false);
+                    else
+                    {
+                        _buffer.Retry(events, DateTimeOffset.UtcNow);
+                        await Task.Delay(_options.FlushInterval, cancellationToken);
+                        break;
                     }
                 }
             }
@@ -271,7 +290,7 @@ public sealed class PulseOpsClient : IAsyncDisposable
         }
     }
 
-    private async Task<bool> SendBatchAsync(List<TelemetryEvent> events, CancellationToken cancellationToken)
+    private async Task<BatchDisposition> SendBatchAsync(List<TelemetryEvent> events, CancellationToken cancellationToken)
     {
         var batch = new TelemetryBatch(1, _options.Application, _options.Environment, events);
         var payload = JsonSerializer.SerializeToUtf8Bytes(batch, TelemetryJsonContext.Default.TelemetryBatch);
@@ -296,12 +315,12 @@ public sealed class PulseOpsClient : IAsyncDisposable
                     }
                     catch (Exception) when (!cancellationToken.IsCancellationRequested)
                     {
-                        return false;
+                        return BatchDisposition.Retry;
                     }
 
                     if (token is not { Length: > 0 and <= 4096 } ||
                         token.Any(character => character is < '!' or > '~'))
-                        return false;
+                        return BatchDisposition.Rejected;
                     request.Headers.Add("X-CSRF-TOKEN", token);
                 }
 
@@ -309,18 +328,18 @@ public sealed class PulseOpsClient : IAsyncDisposable
                 request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
                 using var response = await _sender.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 if (response.StatusCode == HttpStatusCode.Accepted)
-                    return true;
+                    return BatchDisposition.Accepted;
                 if (response.StatusCode == HttpStatusCode.Gone)
                 {
                     // Operator kill switch: intake for this application is suspended. Stop for this session.
                     _ = Task.Run(Disable, CancellationToken.None);
-                    return false;
+                    return BatchDisposition.Rejected;
                 }
 
                 if (response.StatusCode is not (HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests)
                     && (int)response.StatusCode < 500)
                 {
-                    return false;
+                    return BatchDisposition.Rejected;
                 }
 
                 var header = response.Headers.RetryAfter;
@@ -341,7 +360,7 @@ public sealed class PulseOpsClient : IAsyncDisposable
             await Task.Delay(TimeSpan.FromMilliseconds(delay), cancellationToken);
         }
 
-        return false;
+        return BatchDisposition.Retry;
     }
 
     private static Uri? ResolveEndpoint(string baseAddress, string endpoint)

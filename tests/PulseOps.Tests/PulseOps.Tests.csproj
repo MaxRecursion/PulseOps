@@ -8,5 +8,6 @@
     <PackageReference Include="NUnit" />
     <PackageReference Include="NUnit3TestAdapter" PrivateAssets="all" />
     <ProjectReference Include="../../src/PulseOps.Server/PulseOps.Server.csproj" />
+    <ProjectReference Include="../../src/PulseOps.Sdk.Blazor/PulseOps.Sdk.Blazor.csproj" />
   </ItemGroup>
 </Project>

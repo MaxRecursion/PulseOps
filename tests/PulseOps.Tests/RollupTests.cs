@@ -218,7 +218,7 @@ public sealed class RollupTests
         Assert.That(_storage.Process(Now), Is.EqualTo(10));
         Assert.That(Totals(), Is.EqualTo((19, 19)));
         _storage.RecordHook = null;
-        Assert.That(_storage.ReplayDeadLetters(), Is.EqualTo((1, 0)));
+        Assert.That(_storage.ReplayDeadLetters().Returned, Is.EqualTo(1));
         Assert.That(ProcessAll(Now), Is.EqualTo(1));
         Assert.Multiple(() =>
         {

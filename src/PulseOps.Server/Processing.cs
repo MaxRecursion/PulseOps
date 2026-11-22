@@ -4,9 +4,12 @@ using System.Diagnostics;
 
 namespace PulseOps.Server;
 
+public sealed record DeadLetterReplayResult(int Returned, int Duplicates, int Deferred, long Remaining, bool PausedForDisk);
+
 public sealed partial class Storage
 {
     public const int BatchSize = 128;
+    public const int RawRetentionBatch = 5_000;
     private const string PendingColumns =
         "row_id, application, environment, kind, name, outcome, received, anonymous, occurred, version, duration_ms, id";
     private const int QuarantineLimit = 20;
@@ -107,34 +110,107 @@ public sealed partial class Storage
     }
 
     /// <summary>
-    /// Returns up to <paramref name="maximum"/> quarantined records to the inbox after a fix, oldest first. Records whose
-    /// event id was accepted again in the meantime are skipped as duplicates. Both counts are returned.
+    /// Returns quarantined records to the inbox in bounded slices. Capacity- or disk-deferred records remain quarantined.
     /// </summary>
-    public (int Returned, int Duplicates) ReplayDeadLetters(int maximum = 10_000)
+    public DeadLetterReplayResult ReplayDeadLetters(int maximum = 10_000)
     {
-        using var connection = Open();
-        using var transaction = connection.BeginTransaction();
-        using var select = connection.Command(transaction, """
-            SELECT row_id FROM dead_letters ORDER BY row_id LIMIT $limit
-            """, ("$limit", Math.Clamp(maximum, 1, 100_000)));
-        var rows = Read(select, row => row.GetInt64(0));
+        const int sliceSize = 128;
+        int limit = Math.Clamp(maximum, 1, 100_000);
         int returned = 0;
-        foreach (var rowId in rows)
+        int duplicates = 0;
+        int deferred = 0;
+        int examined = 0;
+        long cursor = 0;
+        bool pausedForDisk = false;
+        int inboxMaximum = ReplayInboxMaximum(options.InboxMaximum);
+        int scopeMaximum = ReplayInboxMaximum(ScopeInboxMaximum(options.InboxMaximum));
+
+        while (examined < limit)
         {
-            using var insert = connection.Command(transaction, """
-                INSERT INTO telemetry(application, environment, id, occurred, received, version, session_id, kind, name,
-                    outcome, duration_ms, status_code, trace_id, span_id, parent_span_id, category, value, anonymous)
-                SELECT application, environment, id, occurred, received, version, session_id, kind, name,
-                    outcome, duration_ms, status_code, trace_id, span_id, parent_span_id, category, value, anonymous
-                FROM dead_letters WHERE row_id = $id
-                ON CONFLICT(application, environment, id) DO NOTHING
-                """, ("$id", rowId));
-            returned += insert.ExecuteNonQuery();
-            using var remove = connection.Command(transaction, "DELETE FROM dead_letters WHERE row_id = $id", ("$id", rowId));
-            remove.ExecuteNonQuery();
+            if (!HasDiskReserve())
+            {
+                pausedForDisk = true;
+                break;
+            }
+
+            using var connection = Open();
+            using var transaction = connection.BeginTransaction();
+            using var select = connection.Command(transaction, """
+                SELECT row_id,application,environment,id FROM dead_letters
+                WHERE row_id > $after ORDER BY row_id LIMIT $limit
+                """, ("$after", cursor), ("$limit", Math.Min(sliceSize, limit - examined)));
+            var rows = Read(select, row => (RowId: row.GetInt64(0), Application: row.GetString(1),
+                Environment: row.GetString(2), EventId: row.GetString(3)));
+            if (rows.Count == 0)
+            {
+                transaction.Commit();
+                break;
+            }
+
+            var (total, _) = PendingCounts(connection, transaction, rows[0].Application, rows[0].Environment);
+            var scopedCounts = new Dictionary<(string Application, string Environment), int>();
+            foreach (var row in rows)
+            {
+                cursor = row.RowId;
+                examined++;
+                var scope = (row.Application, row.Environment);
+                if (!scopedCounts.TryGetValue(scope, out var scoped))
+                {
+                    (_, scoped) = PendingCounts(connection, transaction, row.Application, row.Environment);
+                    scopedCounts.Add(scope, scoped);
+                }
+
+                using var exists = connection.Command(transaction, """
+                    SELECT EXISTS(SELECT 1 FROM telemetry WHERE application=$app AND environment=$env AND id=$id)
+                    """, ("$app", row.Application), ("$env", row.Environment), ("$id", row.EventId));
+                if ((long)exists.ExecuteScalar()! != 0)
+                {
+                    DeleteDeadLetter(connection, transaction, row.RowId);
+                    duplicates++;
+                    continue;
+                }
+
+                if (total >= inboxMaximum || scoped >= scopeMaximum)
+                {
+                    deferred++;
+                    continue;
+                }
+
+                using var insert = connection.Command(transaction, """
+                    INSERT INTO telemetry(application, environment, id, occurred, received, version, session_id, kind, name,
+                        outcome, duration_ms, status_code, trace_id, span_id, parent_span_id, category, value, anonymous)
+                    SELECT application, environment, id, occurred, received, version, session_id, kind, name,
+                        outcome, duration_ms, status_code, trace_id, span_id, parent_span_id, category, value, anonymous
+                    FROM dead_letters WHERE row_id = $id
+                    ON CONFLICT(application, environment, id) DO NOTHING
+                    """, ("$id", row.RowId));
+                if (insert.ExecuteNonQuery() == 0)
+                {
+                    DeleteDeadLetter(connection, transaction, row.RowId);
+                    duplicates++;
+                    continue;
+                }
+
+                DeleteDeadLetter(connection, transaction, row.RowId);
+                total++;
+                scopedCounts[scope] = scoped + 1;
+                returned++;
+            }
+            transaction.Commit();
+            if (rows.Count < sliceSize)
+                break;
         }
-        transaction.Commit();
-        return (returned, rows.Count - returned);
+
+        using var countConnection = Open();
+        using var remainingQuery = countConnection.Command(null, "SELECT COUNT(*) FROM dead_letters");
+        long remaining = (long)remainingQuery.ExecuteScalar()!;
+        return new(returned, duplicates, deferred, remaining, pausedForDisk);
+    }
+
+    private static void DeleteDeadLetter(SqliteConnection connection, SqliteTransaction transaction, long rowId)
+    {
+        using var remove = connection.Command(transaction, "DELETE FROM dead_letters WHERE row_id = $id", ("$id", rowId));
+        remove.ExecuteNonQuery();
     }
 
     private static PendingItem ReadPending(SqliteDataReader row) => new(row.GetInt64(0), row.GetString(1), row.GetString(2),
@@ -282,8 +358,8 @@ public sealed partial class Storage
         }
 
         long timestamp = now.ToUnixTimeMilliseconds();
-        long since = Math.Max(item.Received - TimeSpan.FromMinutes(rule.WindowMinutes).Ticks / TimeSpan.TicksPerMillisecond,
-            now.AddMinutes(-rule.WindowMinutes).ToUnixTimeMilliseconds());
+        long window = TimeSpan.FromMinutes(rule.WindowMinutes).Ticks / TimeSpan.TicksPerMillisecond;
+        long since = item.Received - window;
         using var count = connection.Command(transaction, """
             SELECT COUNT(*), COALESCE(SUM(outcome = 'failure'),0)
             FROM telemetry
@@ -295,10 +371,15 @@ public sealed partial class Storage
         var (samples, failures) = Read(count, row => (row.GetInt64(0), row.GetInt64(1))).Single();
         var reached = samples >= rule.MinimumSamples && failures >= rule.MinimumFailures &&
             failures * 100.0 / Math.Max(1, samples) >= rule.FailurePercent;
+        long evaluationDelay = Math.Max(0, timestamp - item.Received);
+        bool historical = evaluationDelay > window;
         string evidence = FormattableString.Invariant(
-            $"{failures:N0} failures in {samples:N0} observations within the last {rule.WindowMinutes} minutes at evaluation. ") +
-            (item.Kind == "api" ? "The caller observed the failures. Inspect the dependency and its correlation records." :
-             "Inspect correlated events in the affected application scope.");
+            $"{failures:N0} failures in {samples:N0} observations in the {rule.WindowMinutes}-minute window ending {DateTimeOffset.FromUnixTimeMilliseconds(item.Received):O}.") +
+            (historical
+                ? FormattableString.Invariant($" Historical evaluation completed {TimeSpan.FromMilliseconds(evaluationDelay)} after receipt; notification was suppressed.")
+                : "") +
+            (item.Kind == "api" ? " The caller observed the failures. Inspect the dependency and its correlation records." :
+             " Inspect correlated events in the affected application scope.");
         if (existing.Id is not null && existing.Status != "Resolved")
         {
             using var update = connection.Command(transaction, """
@@ -333,7 +414,8 @@ public sealed partial class Storage
             ("$state", state), ("$at", item.Occurred), ("$count", failures), ("$evidence", evidence));
         upsert.ExecuteNonQuery();
         WriteHistory(connection, transaction, id, timestamp, state, "PulseOps", evidence, "");
-        EnqueueAlerts(connection, transaction, id, item.Application, item.Environment, rule.Severity, state, timestamp);
+        if (!historical)
+            EnqueueAlerts(connection, transaction, id, item.Application, item.Environment, rule.Severity, state, timestamp);
     }
 
     // Recovery thresholds adapt DataCat's stateFor in artifacts/api-server/src/jobs/monitors.ts
@@ -401,61 +483,49 @@ public sealed partial class Storage
     };
 
     // Raw telemetry retention by data class: exception events (kind "error") use ErrorRetentionDays, everything else
-    // RetentionDays. Stored kinds are discovered with exact seeks on telemetry_retention(kind, received), so every delete
-    // is an exact index range and at most 5,000 rows are removed per call.
-    public void Retain(DateTimeOffset now)
+    // RetentionDays. Oldest expired records across kinds are removed first, with a bounded amount per pass.
+    public int Retain(DateTimeOffset now)
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
-        int removed = 0;
         var (backfillCursor, backfillUntil) = BackfillRange(connection, transaction);
-        string kind = "";
-        using (var nextKind = connection.Command(transaction,
-                   "SELECT kind FROM telemetry WHERE done IS NOT NULL AND kind > $kind ORDER BY kind LIMIT 1", ("$kind", "")))
         using (var expire = connection.Command(transaction, """
                    DELETE FROM telemetry WHERE row_id IN (
-                       SELECT row_id FROM telemetry WHERE done IS NOT NULL AND kind = $kind AND received < $cutoff
+                       SELECT row_id FROM telemetry WHERE done IS NOT NULL
+                         AND ((kind = 'error' AND received < $errorCutoff) OR
+                              (kind <> 'error' AND received < $rawCutoff))
                          AND (row_id <= $cursor OR row_id > $until)
-                       ORDER BY received LIMIT $limit)
-                   """, ("$kind", ""), ("$cutoff", 0L), ("$limit", 0),
-                   ("$cursor", backfillCursor), ("$until", backfillUntil)))
+                       ORDER BY received,row_id LIMIT $limit)
+                   """, ("$rawCutoff", now.AddDays(-options.RetentionDays).ToUnixTimeMilliseconds()),
+            ("$errorCutoff", now.AddDays(-options.ErrorRetentionDays).ToUnixTimeMilliseconds()),
+            ("$limit", RawRetentionBatch), ("$cursor", backfillCursor), ("$until", backfillUntil)))
         {
-            for (int guard = 0; guard < 64 && removed < 5000; guard++)
+            var removed = expire.ExecuteNonQuery();
+            using var incidents = connection.Command(transaction, """
+                DELETE FROM incidents WHERE id IN (
+                    SELECT id FROM incidents WHERE last_seen < $cutoff AND status='Resolved'
+                      AND NOT EXISTS (SELECT 1 FROM incident_history WHERE incident_id=incidents.id AND at >= $cutoff)
+                    LIMIT 100)
+                """, ("$cutoff", now.AddDays(-options.IncidentRetentionDays).ToUnixTimeMilliseconds()));
+            incidents.ExecuteNonQuery();
+            using var releases = connection.Command(transaction, """
+                DELETE FROM releases WHERE rowid IN (SELECT rowid FROM releases WHERE deployed < $cutoff LIMIT 1000)
+                """, ("$cutoff", now.AddDays(-options.IncidentRetentionDays).ToUnixTimeMilliseconds()));
+            releases.ExecuteNonQuery();
+            using var deadLetters = connection.Command(transaction, """
+                DELETE FROM dead_letters WHERE row_id IN (
+                    SELECT row_id FROM dead_letters WHERE quarantined < $cutoff ORDER BY quarantined LIMIT 1000)
+                """, ("$cutoff", now.AddDays(-options.RetentionDays).ToUnixTimeMilliseconds()));
+            deadLetters.ExecuteNonQuery();
+            RetainRollups(connection, transaction, now);
+            ExpireChanges(connection, transaction, now);
+            transaction.Commit();
+            if (removed > 0)
             {
-                nextKind.Parameters["$kind"].Value = kind;
-                if (nextKind.ExecuteScalar() is not string next)
-                    break;
-                kind = next;
-                int days = kind == "error" ? options.ErrorRetentionDays : options.RetentionDays;
-                expire.Parameters["$kind"].Value = kind;
-                expire.Parameters["$cutoff"].Value = now.AddDays(-days).ToUnixTimeMilliseconds();
-                expire.Parameters["$limit"].Value = 5000 - removed;
-                removed += expire.ExecuteNonQuery();
+                using var checkpoint = connection.Command(null, "PRAGMA wal_checkpoint(PASSIVE)");
+                checkpoint.ExecuteNonQuery();
             }
-        }
-        using var incidents = connection.Command(transaction, """
-            DELETE FROM incidents WHERE id IN (
-                SELECT id FROM incidents WHERE last_seen < $cutoff AND status='Resolved'
-                  AND NOT EXISTS (SELECT 1 FROM incident_history WHERE incident_id=incidents.id AND at >= $cutoff)
-                LIMIT 100)
-            """, ("$cutoff", now.AddDays(-options.IncidentRetentionDays).ToUnixTimeMilliseconds()));
-        incidents.ExecuteNonQuery();
-        using var releases = connection.Command(transaction, """
-            DELETE FROM releases WHERE rowid IN (SELECT rowid FROM releases WHERE deployed < $cutoff LIMIT 1000)
-            """, ("$cutoff", now.AddDays(-options.IncidentRetentionDays).ToUnixTimeMilliseconds()));
-        releases.ExecuteNonQuery();
-        using var deadLetters = connection.Command(transaction, """
-            DELETE FROM dead_letters WHERE row_id IN (
-                SELECT row_id FROM dead_letters WHERE quarantined < $cutoff ORDER BY quarantined LIMIT 1000)
-            """, ("$cutoff", now.AddDays(-options.RetentionDays).ToUnixTimeMilliseconds()));
-        deadLetters.ExecuteNonQuery();
-        RetainRollups(connection, transaction, now);
-        ExpireChanges(connection, transaction, now);
-        transaction.Commit();
-        if (removed > 0)
-        {
-            using var checkpoint = connection.Command(null, "PRAGMA wal_checkpoint(PASSIVE)");
-            checkpoint.ExecuteNonQuery();
+            return removed;
         }
     }
 
@@ -473,17 +543,16 @@ public sealed partial class Storage
         string Outcome, long Received, bool Anonymous, long Occurred, string Version, double? DurationMs, string EventId);
 }
 
-public sealed class Processor(Storage storage, PlatformOptions options, TimeProvider clock, ILogger<Processor> logger,
+public sealed class Processor(Storage storage, TimeProvider clock, ILogger<Processor> logger,
     IHubContext<LiveHub>? live = null) : BackgroundService
 {
-    // Each step is isolated: a fault in backfill, monitor evaluation or retention never stops intake processing, and
+    // Each step is isolated: a fault in backfill or retention never stops intake processing, and
     // no fault ends the host (which would take ingestion down with the embedded worker). Logs carry exception types
     // and SQLite codes only, never messages that could echo data.
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var retention = DateTimeOffset.MinValue;
         var broadcast = DateTimeOffset.MinValue;
-        var monitors = DateTimeOffset.MinValue;
         var backfill = DateTimeOffset.MinValue;
         long quarantined = storage.Quarantined;
         int failures = 0;
@@ -491,7 +560,6 @@ public sealed class Processor(Storage storage, PlatformOptions options, TimeProv
         {
             var now = clock.GetUtcNow();
             int processed = 0;
-            int changes = 0;
             bool healthy = Step("processing", () => processed = storage.Process(now));
             // Reserve a small backfill slice during sustained intake so old history keeps advancing.
             if (now >= backfill)
@@ -501,15 +569,11 @@ public sealed class Processor(Storage storage, PlatformOptions options, TimeProv
                 Step("rollup backfill", () => consumed = storage.BackfillRollups(limit));
                 backfill = now.AddSeconds(consumed < limit ? 30 : processed == Storage.BatchSize ? 1 : 0);
             }
-            if (now >= monitors)
-            {
-                Step("monitor evaluation", () => changes = storage.EvaluateMonitors(now));
-                monitors = now.AddSeconds(options.MonitorIntervalSeconds);
-            }
             if (now >= retention)
             {
-                Step("retention", () => storage.Retain(now));
-                retention = now.AddSeconds(30);
+                int removed = 0;
+                bool retained = Step("retention", () => removed = storage.Retain(now));
+                retention = now.AddSeconds(retained && removed == Storage.RawRetentionBatch ? 1 : 30);
             }
             if (storage.Quarantined != quarantined)
             {
@@ -517,7 +581,7 @@ public sealed class Processor(Storage storage, PlatformOptions options, TimeProv
                     storage.Quarantined - quarantined);
                 quarantined = storage.Quarantined;
             }
-            if ((processed > 0 || changes > 0) && live is not null && now >= broadcast)
+            if (processed > 0 && live is not null && now >= broadcast)
             {
                 try
                 {

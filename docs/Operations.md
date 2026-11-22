@@ -4,14 +4,14 @@ Use a dedicated Windows Server with local NTFS storage. PulseOps runs as one ASP
 
 ## Fresh Windows Service installation
 
-1. Provision a Windows Server supported by .NET 10, native PowerShell 7.4 or newer, and the approved **.NET 10 ASP.NET Core Runtime** for the server architecture. The installer requires 10.0.15 or a later .NET 10 servicing release. Allow inbound HTTPS from approved users and relays and outbound HTTPS to the configured identity provider and explicitly approved synthetic targets. Provision space for the database, its WAL, snapshots, and the published releases. [Microsoft runtime downloads](https://dotnet.microsoft.com/en-us/download/dotnet/10.0)
+1. Provision a Windows Server supported by .NET 10, native PowerShell 7.4 or newer, and the approved **.NET 10 ASP.NET Core Runtime** for the server architecture. The installer requires 10.0.15 or a later .NET 10 servicing release. Allow inbound HTTPS from approved users and relays and outbound HTTPS to the configured identity provider and approved synthetic targets and webhooks. If email alerts are enabled, allow the processing host to reach the internal SMTP relay on its configured port. Provision space for the database, its WAL, snapshots, and the published releases. [Microsoft runtime downloads](https://dotnet.microsoft.com/en-us/download/dotnet/10.0)
 2. Create a DNS record such as `pulseops.internal.example`. Install a trusted TLS server certificate for that host with a private key in **Local Computer → Personal**. Use the exact certificate subject in the Kestrel settings, and ensure the certificate covers the chosen DNS name.
 3. Register a confidential OIDC web client. Register the exact sign-in redirect `https://pulseops.internal.example/signin-oidc`. Configure authorization-code flow with PKCE, emit the role and group claims described below, and provision a client secret through the approved secret process. Test with a platform administrator and a scoped support user. [ASP.NET Core OIDC guidance](https://learn.microsoft.com/en-us/aspnet/core/security/authentication/configure-oidc-web-authentication?view=aspnetcore-10.0)
-4. Obtain the reviewed Windows ZIP and the manifest SHA-256 from the trusted release record. The ZIP includes these instructions and the Windows and IIS setup scripts. In elevated PowerShell 7, extract and verify it in an administrator-controlled folder before running a bundled script. The example assumes the reviewed ZIP and digest were copied to `C:\Staging`. [Build and artifact guide](../deployment/teamcity/README.md)
+4. Obtain the reviewed Windows ZIP and the manifest SHA-256 from the trusted release record. The ZIP includes these instructions and the Windows and IIS setup scripts. In elevated PowerShell 7, extract and verify it in an administrator-controlled folder before running a bundled script. The example uses release 0.1.0. Substitute your approved version in the ZIP name. Copy the ZIP to `C:\Staging` and obtain `manifest.sha256` separately from the trusted release record. [Build and artifact guide](../deployment/teamcity/README.md)
 
    ```powershell
    $releaseDirectory = 'C:\Staging\PulseOps-release'
-   $approvedManifestHash = (Get-Content 'C:\Staging\PulseOps-0.1.0-win-x64.manifest.sha256' -Raw).Trim()
+   $approvedManifestHash = (Get-Content 'C:\Staging\manifest.sha256' -Raw).Trim()
    Expand-Archive -LiteralPath 'C:\Staging\PulseOps-0.1.0-win-x64.zip' -DestinationPath $releaseDirectory
    $manifestPath = Join-Path $releaseDirectory 'manifest.json'
    if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -ne $approvedManifestHash) {
@@ -52,7 +52,10 @@ Use a dedicated Windows Server with local NTFS storage. PulseOps runs as one ASP
        "EmbeddedWorker": true,
        "Demo": false,
        "RetentionDays": 14,
+       "ErrorRetentionDays": 30,
        "IncidentRetentionDays": 180,
+       "RollupHourlyDays": 32,
+       "RollupRetentionDays": 180,
        "InboxMaximum": 100000,
        "MinimumFreeMegabytes": 1024,
        "Auth": {
@@ -68,7 +71,12 @@ Use a dedicated Windows Server with local NTFS storage. PulseOps runs as one ASP
            "Environment": "production",
            "Label": "Finance Dashboard",
            "ViewerGroups": ["<production support group claim value>"],
-           "AllowedNames": ["sap-report", "generate-report", "csv-parse"],
+           "AllowedNames": [
+               "reports", "sap-report", "generate-report", "csv-parse", "report-health",
+               "managed-exception", "render-exception", "unobserved-task", "javascript-error", "promise-rejection",
+               "lcp", "inp", "cls", "fcp", "ttfb", "navigation-duration", "long-task-count",
+               "opened", "online", "offline", "visible", "hidden", "ended"
+             ],
            "IngestToken": "<unique random machine secret>",
            "StartupOrigins": []
          }
@@ -90,7 +98,7 @@ Use a dedicated Windows Server with local NTFS storage. PulseOps runs as one ASP
    }
    ```
 
-6. Validate and register the release. The digest must come from a trusted release record. The deploy script checks the manifest and every file, stages a versioned release, migrates the database with the release executable, and registers service recovery.
+6. Validate the runtime and managed installation paths, then register the release. The application validates policy settings during migration and startup. The digest must come from a trusted release record. The deploy script checks the manifest and every file, stages a versioned release, migrates the database with the release executable, and registers service recovery.
 
    ```powershell
    $pulseOpsOrigin = 'https://pulseops.internal.example'
@@ -112,9 +120,17 @@ Use a dedicated Windows Server with local NTFS storage. PulseOps runs as one ASP
 
 ### Identity and application registration
 
-`PlatformAdministrator` sees all scopes. `ApplicationOwner` and `ProductionSupport` may manage incidents in scopes matched by a configured viewer group. `Developer` and `ReadOnlyAuditor` have read access to their matched scopes. Every scoped user needs an accepted role and an exact group claim match. Prefer stable group IDs. Configure claim names from your provider with `RoleClaim` and `GroupsClaim`. Review group overage behavior and role assignment with the identity team.
+Assign operator roles and group claims at the identity provider. Each non-administrator sees only scopes whose `ViewerGroups` contain one of their exact group claims. Use stable group IDs, set `RoleClaim` and `GroupsClaim` to the emitted claim names, and test group overage with the identity team. The audit records the operator’s OIDC subject.
 
-Add an entry to `Scopes` for each application and environment combination. Use lowercase slug identifiers up to 40 characters and explicit telemetry aliases. Give each combination a distinct random ingest token, with at least 32 characters. Send ordinary browser telemetry to an authenticated same-origin relay in the monitored application. The relay must bind the application/environment on the server, check CSRF and body size, and attach the token on its outgoing HTTPS request to PulseOps. The demo relay is an integration sample for local use. Keep `StartupOrigins` empty unless you intend to collect restricted anonymous milestones. When enabled, register each exact HTTPS origin with no trailing slash.
+| Operator role | Actions |
+| --- | --- |
+| PlatformAdministrator | Read every scope and platform health, manage incidents, propose and decide changes, verify and export the audit log. |
+| ApplicationOwner | Manage incidents, read change history, propose changes and withdraw own pending proposals in visible scopes. |
+| ProductionSupport | Investigate and manage incidents in visible scopes. |
+| Developer | Investigate telemetry, monitors, incidents and maintenance windows in visible scopes. |
+| ReadOnlyAuditor | Read scoped investigations, changes and audit entries and export the scoped log. |
+
+Add an entry to `Scopes` for each application and environment combination. Use lowercase slug identifiers up to 40 characters and explicit telemetry aliases. Give each combination a distinct random ingest token, with at least 32 characters. Send ordinary browser telemetry to an authenticated same-origin relay in the monitored application. The relay must bind the application/environment on the server, check CSRF and body size, and attach the token on its outgoing HTTPS request to PulseOps. The demo relay is an integration sample for local use. Register the SDK’s session, error and metric names for enabled captures as shown in the example. A single unregistered alias causes the collector to reject the whole batch. Keep `StartupOrigins` empty unless you intend to collect restricted anonymous milestones. When enabled, register each exact HTTPS origin with no trailing slash.
 
 Use ASP.NET Core environment keys such as `PulseOps__Auth__ClientSecret` and `PulseOps__Scopes__0__IngestToken` for an approved secret injection mechanism. The private JSON provider takes precedence over bundled defaults and environment values override the private file. When using the Windows wrapper, keep the machine environment neutral for the managed database/key paths, processing topology, and runtime environment selection. Restart the affected processes after config or secret changes. Keep secrets out of release archives, terminal transcripts, screenshots, logs, and browser assets.
 
@@ -124,13 +140,96 @@ Set `PulseOps.EmbeddedWorker` to `false` before deploying with a detached worker
 
 To enable automatic incident recovery for a rule, set `RecoveryPercent` strictly below its opening `FailurePercent` and choose `RecoveryWindows` from two to six. Every consecutive post-opening window must satisfy the recovery percentage and minimum sample count. A scope with too little recovery data remains open for operator investigation.
 
-Add scheduled probes under `PulseOps.Probes`. Each item accepts `Application`, `Environment`, `Name`, `Url`, `IntervalSeconds` and `ExpectedStatus`. Add the same name to the scope's `AllowedNames`. Use fixed approved HTTPS health URLs, without credentials or sensitive query strings. The worker uses read-only GET, no redirects, and regular certificate validation. Place network restrictions around the service so DNS changes cannot redirect probes into an unexpected trust zone. Probe data records observed HTTPS status and elapsed time. Independent certificate-expiry and DNS monitor coverage belongs in the host's operational monitoring.
+A synthetic check uses an approved HTTPS URL and a registered telemetry alias. The worker performs a GET with redirects disabled, validates TLS and records status, duration and coarse failure categories such as DNS, connection or TLS. A successful check nearing certificate expiry reports a degraded TLS result. `CertificateWarningDays` defaults to 14 and accepts 0 to disable the expiry warning. Restrict outbound destinations at the host or firewall.
 
-### Incident notifications
+### Configure monitors and probes
 
-Set `PulseOps.PortalOrigin` to the exact public HTTPS portal origin, without a path or trailing slash, and add an approved destination to `PulseOps.Webhooks`. Each destination accepts `Name` (stable unique alias), `Url`, optional `Application` and `Environment` filters, `Severities` (defaults to high and critical), and optional `BearerToken`. Keep the token in protected host configuration. Treat an omitted scope filter as every application or environment for that axis.
+Merge these properties into the existing `PulseOps` object in the private configuration. Here `report-health` and `sap-report` are registered aliases in the example scope. Restart the configured processes after changing the file.
 
-The worker sends a compact JSON notification for matching incident openings, reopenings and resolutions. It includes delivery and incident IDs, application, environment, severity, status, and the internal incident URL. Configure the approved receiver to acknowledge only accepted deliveries with a 2xx response and deduplicate on the `Idempotency-Key` header, since timeouts or worker restarts can result in redelivery. Retryable responses use bounded retries and server guidance where provided. Redirects are disabled. Include the destination in outbound network policy and verify its delivery-failure counter on the administrator platform health view.
+```json
+{
+  "MonitorIntervalSeconds": 60,
+  "Probes": [
+    {
+      "Application": "finance-dashboard", "Environment": "production", "Name": "report-health",
+      "Url": "https://reports.internal.example/health/ready",
+      "ExpectedStatus": 200, "IntervalSeconds": 60, "CertificateWarningDays": 14
+    }
+  ],
+  "Monitors": [
+    {
+      "Application": "finance-dashboard", "Environment": "production", "Name": "sap-report-p95",
+      "Type": "latency", "Kind": "api", "Target": "sap-report", "Percentile": 95,
+      "ThresholdMs": 1200, "RecoveryMs": 900, "WindowMinutes": 10,
+      "MinimumSamples": 20, "EvaluationDelayMinutes": 1, "RecoveryWindows": 2, "Severity": "high"
+    },
+    {
+      "Application": "finance-dashboard", "Environment": "production", "Name": "report-health-missing",
+      "Type": "no-data", "Kind": "synthetic", "Target": "report-health",
+      "WindowMinutes": 5, "NoDataMinutes": 10, "Severity": "high"
+    }
+  ]
+}
+```
+
+The Monitors page shows the latest evaluation, measured value and incident state. Latency monitors can also require a ratio against preceding complete UTC hours using `BaselineDays` and `BaselineRatio`. No-data monitors measure elapsed time since trusted receipt and allow a grace period for a new signal. Regression monitors compare the latest recorded deployment with the preceding distinct version. Submit release markers and matching event versions before evaluating a regression. A window with too little eligible data appears as insufficient. Keep historical baseline and comparison periods within the relevant hourly rollup and raw retention windows. [Release marker setup](../deployment/teamcity/README.md)
+
+### Approvals, maintenance and auditing
+
+To add a monitor without editing host configuration, open **Administration**, propose a monitor for an authorized scope and enter an operational reason. A second operator with the PlatformAdministrator role reviews and approves or rejects the proposal. The proposer can withdraw it while pending. The same workflow schedules and cancels maintenance. During an active window, an incident transition still records its history and the worker suppresses new matching deliveries. Include the support ticket reference in reasons and keep customer data, secrets and telemetry payloads out of reasons and notes.
+
+| Setting or limit | Operational behavior |
+| --- | --- |
+| `Administration.ChangeExpiryHours` | Defaults to 72, accepts 1–720. A pending proposal expires at its deadline. |
+| `Administration.MaximumPendingChanges` | Global queue, default 50, permitted 1–500. Decide or withdraw outstanding proposals to free capacity. |
+| `Administration.AllowSelfApproval` | Production requires `false`. The explicitly enabled local demo permits one operator to exercise the workflow. |
+| Managed monitors | Up to 300 defined in the portal plus 300 in configuration. At capacity, approval of an additional monitor returns a conflict. A separate approved deletion frees capacity for a retry while the proposal remains pending. Existing monitors can be updated at capacity. |
+| Maintenance | A scheduled window identifies one application/environment. Maximum duration is seven days, with a start at most 90 days in the future. |
+
+Configuration-file monitors are read-only in the portal. An approved portal change applies with its audit entry in one SQLite transaction. If another revision or a host configuration change invalidates the proposal, review the new state and submit a fresh proposal. Use the host’s normal change control for identity, scopes, secrets, deployment settings and configuration-file edits.
+
+Open the **Audit log** in Administration to verify the chain and inspect events. Its NDJSON download contains the caller’s visible rows for the requested period. To archive a verified full-chain snapshot, run the matching staged executable with an absolute config path. Use an approved account with access to that database and a protected output directory. Substitute the active release for the example version.
+
+```powershell
+$installRoot = 'C:\ProgramData\PulseOps'
+$serverExe = Join-Path $installRoot 'releases\0.1.0\server\PulseOps.Server.exe'
+$privateConfig = Join-Path $installRoot 'appsettings.Production.json'
+$auditFile = Join-Path $installRoot ("backups\audit-{0}.ndjson" -f [guid]::NewGuid())
+& $serverExe --config $privateConfig --export-audit $auditFile
+if ($LASTEXITCODE -ne 0) { throw 'Audit verification or export failed.' }
+```
+
+The full export requires a new file, checks the chain in one database snapshot, and prints its entry count and SHA-256 head. Keep the file, count and head in separately protected storage. Comparing with a prior trusted export detects rewritten or truncated history. If verification fails, preserve the database and snapshots for investigation. The scoped portal download can omit links belonging to other scopes.
+
+### Route incident notifications
+
+Set the public `PortalOrigin` to the exact HTTPS origin without a trailing slash. Merge the following settings into `PulseOps` and replace the hosts and addresses with approved internal destinations. An empty application or environment filter includes every value on that axis. Route names are unique across both adapters.
+
+```json
+{
+  "PortalOrigin": "https://pulseops.internal.example",
+  "Webhooks": [
+    {
+      "Name": "reporting-pager", "Url": "https://alerts.internal.example/pulseops",
+      "Application": "finance-dashboard", "Environment": "production", "Severities": ["critical"]
+    }
+  ],
+  "Smtp": {
+    "Host": "mail.internal.example", "Port": 587, "UseTls": true,
+    "From": "pulseops@internal.example", "TimeoutSeconds": 15
+  },
+  "EmailRoutes": [
+    {
+      "Name": "reporting-oncall", "Recipients": ["reporting-oncall@internal.example"],
+      "Application": "finance-dashboard", "Environment": "production", "Severities": ["high", "critical"]
+    }
+  ]
+}
+```
+
+`UseTls: true` requires the relay to advertise STARTTLS and present a trusted certificate matching its host. Use a STARTTLS listener such as port 587. An implicit-TLS-only listener on 465 is incompatible with this sender. Configure `Smtp.UserName` and `Smtp.Password` together when relay authentication is required. Production permits cleartext only for a loopback relay without credentials. Inject credentials and optional webhook tokens through the private host configuration, for example `PulseOps__Smtp__Password` or `PulseOps__Webhooks__0__BearerToken`. A route accepts 1–20 mailbox addresses. Use approved group mailboxes when possible.
+
+The outbox stores matching incident transitions. The worker rechecks the destination’s current scope and severity before dispatch. Email and webhook messages identify the incident and provide a portal link. Evidence remains in the authenticated portal. Webhooks carry an `Idempotency-Key`, and email carries a stable `X-PulseOps-Delivery` value. Receivers can see duplicate attempts after partial SMTP acceptance, timeout or restart. SMTP 4xx replies and connection failures retry with exponential backoff and remain pending until accepted or otherwise permanently rejected. Webhooks retry 408, 429 and 5xx responses and use bounded `Retry-After` guidance. Permanent destination or recipient rejections remain failed and visible for operator action; automatic audited requeue is not yet available. Test each route with a labeled staging incident and check delivery counters in Platform before enabling production filters.
 
 ### Health and first response
 
@@ -148,11 +247,25 @@ Get-Service PulseOps, PulseOpsWorker -ErrorAction SilentlyContinue
 | Readiness returns 503 | Worker registration or restart loop, shared config path, schema status, data directory ACLs, write contention, and disk reserve |
 | Ordinary batches return 401 | Scope identifiers and the relay's scoped bearer secret |
 | Startup batches return 403 | Registered exact origin and whether anonymous collection is enabled for that scope |
+| Batches return 410 | The scope has `IntakeSuspended` enabled. Coordinate reactivation with the application owner. |
 | Batches return 400 | Schema version, batch count, aliases and fixed categories, clock skew, and strict JSON fields |
 | Batches return 429 | Server `Retry-After`, relay request fan-in behind one IP, pending queue, disk reserve, and retention |
 | Batches return 503 | SQLite lock contention, file access, and I/O errors |
 | Portal appears empty | Sign-in role, viewer groups, selected scope and interval, receipt and processing state |
 | Incident did not open | Rule scope, received-time window, sample minimum, failure threshold, and whether observations were anonymous |
+
+Failure incidents are evaluated over their server receipt-time window. If processing resumes after that window has elapsed, PulseOps evaluates the historical window and records a clearly labeled incident without sending a delayed page. Treat oldest-pending age and worker heartbeat as incident-coverage signals; a healthy heartbeat alone does not guarantee that current windows were evaluated on time.
+
+### Replay quarantined receipts
+
+In Platform, check **dead letters**, **oldest pending** and **worker heartbeat**. A record-specific processing failure can quarantine an already accepted event. A systemic storage failure can instead leave a backlog and stale heartbeat. First fix the processor or storage issue, verify the current backup and check available disk and inbox headroom. Use the same matching executable and config paths defined in the audit example.
+
+```powershell
+& $serverExe --config $privateConfig --replay-dead-letters
+if ($LASTEXITCODE -ne 0) { throw 'Dead-letter replay failed.' }
+```
+
+Each invocation scans up to 10,000 records in short transactions, checks the disk reserve for each slice, and observes the global and per-scope inbox limits while leaving headroom for live intake. It reports returned, duplicate, capacity-deferred and remaining counts; deferred records stay quarantined for a later invocation. Completed slices remain committed if a later slice fails. Verify that the worker drains the inbox, dead letters decrease and the same failures do not recur before repeating. Replay works on the local SQLite database and requires operator filesystem access.
 
 ## Backup, restoration, and upgrades
 
@@ -163,11 +276,11 @@ Create regular SQLite snapshots according to the service's recovery-point object
 ./deployment/windows/PulseOps.ps1 VerifyBackup -SnapshotPath 'C:\ProgramData\PulseOps\backups\approved.db'
 ```
 
-The script defaults to a unique timestamped file under `backups`. Pass an explicit destination only inside protected storage. Keep SQLite journal sidecars with the live database and use the backup command for portable snapshots. Use the version that understands the snapshot's schema. Regularly restore into a separate isolated installation and smoke-test RPO and RTO. Database snapshots contain operational information including incident history and should be protected accordingly.
+The script defaults to a unique timestamped file under `backups`. Pass an explicit destination only inside protected storage. Keep SQLite journal sidecars with the live database and use the backup command for portable snapshots. `VerifyBackup` checks integrity and compatibility with the selected executable's schema before a restore or rollback stops or disables services. Use the release that understands the snapshot's schema. Regularly restore into a separate isolated installation and smoke-test RPO and RTO. Database snapshots contain operational information including incident history and should be protected accordingly.
 
 For a planned upgrade, export your current protected config, record the current release and manifest hash, and keep the previous build in the versioned release directory. Run `Deploy` with the new extracted artifact and trusted digest. The deployment takes a verified pre-release snapshot while hosts are stopped, runs the new release's migrator, and gates startup on health. A failed upgrade leaves service registrations stopped or disabled for recovery. Inspect the Event Log and record the last snapshot path printed by the script.
 
-Restore replaces the live data with the selected snapshot. Take both hosts and any other local process using the database offline first. Restoring an older snapshot rewinds incident activity and telemetry to the backup point. Preserve the current state for recovery before replacing it. The wrapper creates a pre-restore snapshot when the live database is available. Use an authorized clean recovery installation for an unreadable database that cannot be backed up. During a recovery, omit `-Version` only if the registered release matches the snapshot's schema.
+Restore replaces the live data with the selected snapshot. Take both hosts and any other local process using the database offline first. Restoring an older snapshot rewinds incident activity and telemetry to the backup point. Preserve the current state for recovery before replacing it. The wrapper creates a pre-restore snapshot when the live database is available and registers the selected executable for the server and worker services after a successful restore. Run `Migrate` and `Start` with that same release. Use an authorized clean recovery installation for an unreadable database that cannot be backed up. During a recovery, omit `-Version` only if the currently registered release matches the snapshot's schema.
 
 ```powershell
 $install = './deployment/windows/PulseOps.ps1'
@@ -179,7 +292,18 @@ $install = './deployment/windows/PulseOps.ps1'
 
 Use `Rollback -Version <old-version> -HealthUrl <origin>` to reactivate an earlier staged release with a compatible schema. Add `-SnapshotPath <pre-upgrade-snapshot>` when the prior binary requires the earlier database. Use the matching private configuration version. A snapshot-based rollback supersedes intervening records. Verify health, then verify SSO, scope access, a new dry-run event, and worker processing. Use `Remove` to remove the SCM registrations while preserving releases, backups, config, and data.
 
-SQLite retention removes old processed telemetry in bounded batches. Open incidents remain available beyond the resolved-incident retention value. The database may reuse freed pages without shrinking its on-disk file, so monitor actual free space and WAL size as well as recent ingestion. Arrange a maintenance window for any separate compaction after a verified backup. Observe the production workload before sizing long-term retention.
+| SQLite records | Retention on the live host |
+| --- | --- |
+| Processed raw events | `RetentionDays` defaults to 14 (1–90). Pending receipts remain available for processing. |
+| Error events | `ErrorRetentionDays` defaults to 30, bounded by the active raw and incident retention settings. Explicit values must be at least raw retention and at most 90 days and incident retention. |
+| Hourly and daily rollups | `RollupHourlyDays` defaults to 32 (2–90). Daily `RollupRetentionDays` defaults to 180, at least hourly retention and at most 3650 days. History uses UTC buckets and bounded histograms for latency percentiles. |
+| Resolved incidents and releases | `IncidentRetentionDays` defaults to 180 and accepts up to 3650 days. Recent incident history can extend the lifetime of a resolved incident. |
+| Quarantined events | Dead-letter retention uses `RetentionDays` from quarantine time. |
+| Audit chain | Append-only. Archive verified exports and budget disk for continued growth. |
+
+After upgrading an earlier database, the worker backfills history from retained, processed receipts. Watch `rollupBackfillRemaining` in platform health until it reaches zero. Historical periods whose raw data expired before the upgrade cannot be reconstructed. A database restore can also rewind audit history and revive queued alerts. Compare the restored chain with the off-host archive and reconcile deliveries with receivers using the delivery ID before restoring normal traffic.
+
+SQLite retention removes up to 5,000 oldest eligible processed telemetry rows per pass, fairly across data kinds. When a pass reaches that bound, the worker schedules another pass after one second; otherwise, the normal interval is 30 seconds. Platform health reports the count and age of expired raw rows awaiting deletion. Open incidents remain available beyond the resolved-incident retention value. The database may reuse freed pages without shrinking its on-disk file, so monitor actual free space and WAL size as well as recent ingestion. Arrange a maintenance window for any separate compaction after a verified backup. Observe expiry lag, ingest latency, and disk/WAL headroom under the target workload before sizing long-term retention.
 
 ## IIS alternative
 

@@ -87,7 +87,7 @@ public sealed partial class Storage
         List<ScheduledPolicy> entries;
         using (var snapshot = db.BeginTransaction(deferred: true))
             entries = MonitorPolicies(db, snapshot, [.. options.Scopes]);
-        int changes = 0;
+        int changes = RemoveRetiredMonitorStates(db);
         long at = now.ToUnixTimeMilliseconds();
         foreach (var entry in entries)
         {
@@ -115,6 +115,45 @@ public sealed partial class Storage
                 changes++;
         }
         return changes;
+    }
+
+    private int RemoveRetiredMonitorStates(SqliteConnection db)
+    {
+        // Configuration may remove a policy or a whole scope while the worker is stopped. A stale Alert here
+        // would continue contributing to platform health even though the policy no longer appears in the portal.
+        var configured = options.Monitors.Select(p => (p.Application, p.Environment, p.Name)).ToHashSet();
+        var scopes = options.Scopes.Select(s => (s.Application, s.Environment)).ToHashSet();
+        var retired = new List<(string App, string Env, string Name)>();
+        using (var select = db.Command(null, """
+                   SELECT s.application,s.environment,s.name,p.name FROM monitor_state s
+                   LEFT JOIN monitor_policies p USING(application, environment, name)
+                   """))
+        using (var reader = select.ExecuteReader())
+        {
+            while (reader.Read() && retired.Count < 300)
+            {
+                var key = (App: reader.GetString(0), Env: reader.GetString(1), Name: reader.GetString(2));
+                if (!configured.Contains(key) && (reader.IsDBNull(3) || !scopes.Contains((key.App, key.Env))))
+                    retired.Add(key);
+            }
+        }
+        if (retired.Count == 0)
+            return 0;
+        using var transaction = db.BeginTransaction();
+        using var remove = db.Command(transaction, """
+            DELETE FROM monitor_state WHERE application=$app AND environment=$env AND name=$name
+                AND ($unregistered OR NOT EXISTS(SELECT 1 FROM monitor_policies
+                    WHERE application=$app AND environment=$env AND name=$name))
+            """, ("$app", ""), ("$env", ""), ("$name", ""), ("$unregistered", false));
+        int removed = 0;
+        foreach (var key in retired)
+        {
+            Set(remove, ("$app", key.App), ("$env", key.Env), ("$name", key.Name),
+                ("$unregistered", !scopes.Contains((key.App, key.Env))));
+            removed += remove.ExecuteNonQuery();
+        }
+        transaction.Commit();
+        return removed;
     }
 
     private static bool IsCurrentMonitor(SqliteConnection db, SqliteTransaction transaction, ScheduledPolicy entry)
@@ -176,20 +215,35 @@ public sealed partial class Storage
     private static Measurement MeasureRegression(SqliteConnection db, SqliteTransaction transaction, MonitorPolicy p,
         long since, long until)
     {
-        // The latest registered deployment is compared with the most recent preceding different version. Exclude
-        // canary traffic bearing another version and constrain each population to the period of its own deployment.
-        (string Version, long At)? Release(string? exclude)
+        var releases = new List<(string Version, long At)>(2);
+        using (var command = MonitorCommand(db, transaction, p, """
+                   SELECT version,deployed FROM releases WHERE application=$app AND environment=$env AND deployed < $until
+                   ORDER BY deployed DESC LIMIT 1025
+                   """, ("$until", until)))
+        using (var row = command.ExecuteReader())
         {
-            using var command = MonitorCommand(db, transaction, p, $"""
-                SELECT version, deployed FROM releases WHERE application=$app AND environment=$env AND deployed < $until
-                    {(exclude is null ? "" : "AND version != $exclude")}
-                ORDER BY deployed DESC, build_id DESC LIMIT 1
-                """, ("$until", until), ("$exclude", exclude));
-            using var row = command.ExecuteReader();
-            return row.Read() ? (row.GetString(0), row.GetInt64(1)) : null;
+            int markers = 0;
+            while (row.Read())
+            {
+                if (++markers > 1024)
+                    return new(Condition.Insufficient, null, null, 0, "The release comparison exceeds 1024 deployment markers.");
+                (string Version, long At) marker = (row.GetString(0), row.GetInt64(1));
+                if (releases.Count == 0)
+                    releases.Add(marker);
+                else if (releases[^1].Version == marker.Version)
+                    releases[^1] = marker; // redeploying the same version continues its existing cohort
+                else if (releases[^1].At == marker.At)
+                    return new(Condition.Insufficient, null, null, 0, "Different release versions share a deployment timestamp.");
+                else if (releases.Count == 2)
+                    break;
+                else
+                    releases.Add(marker);
+            }
         }
-        if (Release(null) is not { } latest || Release(latest.Version) is not { } previous)
+        if (releases.Count < 2)
             return new(Condition.Insufficient, null, null, 0, "Two distinct registered release versions are required.");
+        var latest = releases[0];
+        var previous = releases[1];
         var current = ReadMonitorWindow(db, transaction, p, Math.Max(since, latest.At), until, latest.Version);
         var reference = ReadMonitorWindow(db, transaction, p, Math.Max(previous.At, latest.At - p.ComparisonHours * HourMs),
             latest.At, previous.Version);

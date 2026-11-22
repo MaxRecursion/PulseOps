@@ -264,12 +264,15 @@ public sealed partial class Storage(PlatformOptions options)
         throw new InvalidOperationException("The SQLite file is not a recognized PulseOps database.");
     }
 
-    public static void VerifyBackup(string path)
+    public static void VerifyBackup(string path, bool requireCurrentSchema = false)
     {
         using var connection = OpenFile(Path.GetFullPath(path), SqliteOpenMode.ReadOnly);
         ValidateEngine(connection);
         using var version = connection.Command(null, "PRAGMA user_version");
-        ValidateIdentity(connection, null, (long)version.ExecuteScalar()!);
+        long schemaVersion = (long)version.ExecuteScalar()!;
+        ValidateIdentity(connection, null, schemaVersion);
+        if (requireCurrentSchema)
+            ValidateSchema(connection);
         using var check = connection.Command(null, "PRAGMA integrity_check(1)");
         if ((string?)check.ExecuteScalar() != "ok")
             throw new InvalidOperationException("SQLite backup failed integrity verification.");
@@ -324,19 +327,7 @@ public sealed partial class Storage(PlatformOptions options)
             return null;
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
-        using var pending = connection.Command(transaction, """
-            SELECT COUNT(*), COALESCE(SUM(application = $app AND environment = $env), 0)
-            FROM telemetry WHERE done IS NULL
-            """, ("$app", scope.Application), ("$env", scope.Environment));
-        int total;
-        int scoped;
-        using (var counts = pending.ExecuteReader())
-        {
-            counts.Read();
-            total = counts.GetInt32(0);
-            scoped = counts.GetInt32(1);
-        }
-        int scopeMaximum = Math.Min(options.InboxMaximum, Math.Max(100, options.InboxMaximum / 4));
+        var (total, scoped) = PendingCounts(connection, transaction, scope.Application, scope.Environment);
         int accepted = 0;
         foreach (var item in events)
         {
@@ -354,12 +345,31 @@ public sealed partial class Storage(PlatformOptions options)
                 ("$parent", item.ParentSpanId), ("$category", item.Category), ("$value", item.Value),
                 ("$anonymous", anonymous));
             accepted += insert.ExecuteNonQuery();
-            if (accepted > 0 && (total + accepted > options.InboxMaximum || scoped + accepted > scopeMaximum))
+            if (accepted > 0 && (total + accepted > options.InboxMaximum ||
+                scoped + accepted > ScopeInboxMaximum(options.InboxMaximum)))
                 return null;
         }
         transaction.Commit();
         return accepted;
     }
+
+    private static (int Total, int Scoped) PendingCounts(SqliteConnection connection, SqliteTransaction transaction,
+        string application, string environment)
+    {
+        using var pending = connection.Command(transaction, """
+            SELECT COUNT(*), COALESCE(SUM(application = $app AND environment = $env), 0)
+            FROM telemetry WHERE done IS NULL
+            """, ("$app", application), ("$env", environment));
+        using var counts = pending.ExecuteReader();
+        counts.Read();
+        return (counts.GetInt32(0), counts.GetInt32(1));
+    }
+
+    private static int ScopeInboxMaximum(int inboxMaximum) =>
+        Math.Min(inboxMaximum, Math.Max(100, inboxMaximum / 4));
+
+    private static int ReplayInboxMaximum(int inboxMaximum) =>
+        Math.Max(0, inboxMaximum - Math.Min(100, Math.Max(1, inboxMaximum / 10)));
 
     public void AddRelease(AppScope scope, ReleaseMarker marker, DateTimeOffset now)
     {
@@ -372,8 +382,9 @@ public sealed partial class Storage(PlatformOptions options)
         command.ExecuteNonQuery();
     }
 
-    public object PlatformHealth()
+    public object PlatformHealth(DateTimeOffset? now = null)
     {
+        var evaluatedAt = now ?? DateTimeOffset.UtcNow;
         using var connection = Open();
         using var statement = connection.Command(null, """
             SELECT COUNT(*), MIN(received),
@@ -385,9 +396,14 @@ public sealed partial class Storage(PlatformOptions options)
                 (SELECT MAX(backfill_until - backfill_cursor, 0) FROM rollup_state WHERE id = 1),
                 (SELECT COUNT(*) FROM monitor_state WHERE state = 'Alert'),
                 (SELECT COUNT(*) FROM config_changes WHERE status = 'Pending'),
-                (SELECT COUNT(*) FROM audit_log)
+                (SELECT COUNT(*) FROM audit_log),
+                (SELECT COUNT(*) FROM telemetry expired WHERE done IS NOT NULL AND
+                    ((kind = 'error' AND received < $errorCutoff) OR (kind <> 'error' AND received < $rawCutoff))),
+                (SELECT MIN(received) FROM telemetry expired WHERE done IS NOT NULL AND
+                    ((kind = 'error' AND received < $errorCutoff) OR (kind <> 'error' AND received < $rawCutoff)))
             FROM telemetry WHERE done IS NULL
-            """);
+            """, ("$rawCutoff", evaluatedAt.AddDays(-options.RetentionDays).ToUnixTimeMilliseconds()),
+            ("$errorCutoff", evaluatedAt.AddDays(-options.ErrorRetentionDays).ToUnixTimeMilliseconds()));
         using var rows = statement.ExecuteReader();
         rows.Read();
         using var process = System.Diagnostics.Process.GetCurrentProcess();
@@ -397,6 +413,7 @@ public sealed partial class Storage(PlatformOptions options)
             deadLetters = rows.GetInt64(5), notificationFailures = rows.GetInt64(4), notificationsPending = rows.GetInt64(6),
             workerHeartbeat = rows.NullableTime(3), rollupBackfillRemaining = rows.IsDBNull(7) ? 0 : rows.GetInt64(7),
             monitorsAlerting = rows.GetInt64(8), pendingChanges = rows.GetInt64(9), auditEntries = rows.GetInt64(10),
+            expiredRawRows = rows.GetInt64(11), oldestExpiredRawAt = rows.NullableTime(12),
             databaseBytes = new[] { "", "-wal", "-shm" }.Sum(suffix =>
                 File.Exists(FilePath + suffix) ? new FileInfo(FilePath + suffix).Length : 0),
             freeDiskBytes = FreeDiskBytes(), processWorkingSetBytes = process.WorkingSet64,

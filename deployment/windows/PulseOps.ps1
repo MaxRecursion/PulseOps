@@ -387,6 +387,12 @@ try {
             Disable-PulseServices
             if (Test-Path -LiteralPath $db) { Backup-LiveDatabase $exe 'before-restore' }
             Invoke-HostCommand $exe @('--restore', $snapshot)
+            if ($detached) {
+                Set-PulseService $workerName $exe -Worker
+            } elseif (Get-ServiceRelease $workerName) {
+                Invoke-PulseProcess $sc @('config', $workerName, 'start=', 'disabled')
+            }
+            Set-PulseService $serverName $exe
         }
         { $_ -in @('Deploy', 'Rollback') } {
             if ($Action -eq 'Rollback' -and $snapshot) { Invoke-HostCommand $exe @('--verify-backup', $snapshot) }

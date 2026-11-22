@@ -2,8 +2,10 @@ namespace PulseOps.Sdk.Blazor;
 
 internal sealed class TelemetryBuffer(int capacity)
 {
+    private static readonly TimeSpan MaximumPendingAge = TimeSpan.FromHours(23);
     private readonly object _gate = new();
-    private readonly Queue<TelemetryEvent>[] _priorities = [new(), new(), new(), new(), new(), new()];
+    private readonly LinkedList<TelemetryEvent>[] _priorities = [new(), new(), new(), new(), new(), new()];
+    private readonly Dictionary<Guid, int> _inFlight = [];
     private int _count;
     private long _queued;
     private long _accepted;
@@ -23,12 +25,12 @@ internal sealed class TelemetryBuffer(int capacity)
                     return _count;
                 }
 
-                _priorities[victim].Dequeue();
+                _priorities[victim].RemoveFirst();
                 _count--;
                 _dropped++;
             }
 
-            _priorities[priority].Enqueue(item);
+            _priorities[priority].AddLast(item);
             _count++;
             _queued++;
             return _count;
@@ -42,24 +44,50 @@ internal sealed class TelemetryBuffer(int capacity)
             var result = new List<TelemetryEvent>(Math.Min(limit, _count));
             foreach (var queue in _priorities)
             {
-                while (result.Count < limit && queue.TryDequeue(out var item))
+                while (result.Count < limit && queue.First is { } first)
                 {
-                    _count--;
-                    result.Add(item);
+                    queue.RemoveFirst();
+                    _inFlight.Add(first.Value.Id, Array.IndexOf(_priorities, queue));
+                    result.Add(first.Value);
                 }
             }
             return result;
         }
     }
 
-    public void Processed(int size, bool accepted)
+    public void Retry(List<TelemetryEvent> events, DateTimeOffset now)
     {
         lock (_gate)
         {
-            if (accepted)
-                _accepted += size;
-            else
-                _dropped += size;
+            foreach (var item in events.AsEnumerable().Reverse())
+            {
+                if (!_inFlight.Remove(item.Id, out int priority))
+                    continue;
+                if (item.OccurredAt < now - MaximumPendingAge)
+                {
+                    _count--;
+                    _dropped++;
+                    continue;
+                }
+                _priorities[priority].AddFirst(item);
+            }
+        }
+    }
+
+    public void Processed(List<TelemetryEvent> events, bool accepted)
+    {
+        lock (_gate)
+        {
+            foreach (var item in events)
+            {
+                if (!_inFlight.Remove(item.Id))
+                    continue;
+                _count--;
+                if (accepted)
+                    _accepted++;
+                else
+                    _dropped++;
+            }
         }
     }
 
@@ -79,10 +107,12 @@ internal sealed class TelemetryBuffer(int capacity)
     {
         lock (_gate)
         {
-            _dropped += _count;
-            _count = 0;
             foreach (var queue in _priorities)
+            {
+                _dropped += queue.Count;
+                _count -= queue.Count;
                 queue.Clear();
+            }
         }
     }
 }

@@ -79,7 +79,7 @@ public sealed class ProcessingTests
         Assert.That(health.GetProperty("deadLetters").GetInt64(), Is.EqualTo(1));
 
         _storage.RecordHook = null;
-        Assert.That(_storage.ReplayDeadLetters(), Is.EqualTo((1, 0)));
+        Assert.That(_storage.ReplayDeadLetters().Returned, Is.EqualTo(1));
         Assert.That(Scalar("SELECT COUNT(*) FROM dead_letters"), Is.Zero);
         Assert.That(_storage.Process(Now), Is.EqualTo(1));
         Assert.That(Scalar("SELECT COUNT(*) FROM telemetry WHERE done IS NOT NULL"), Is.EqualTo(10));
@@ -96,7 +96,7 @@ public sealed class ProcessingTests
             Assert.That(_storage.Process(Now), Is.EqualTo(1));
         }
         _storage.RecordHook = null;
-        Assert.That(_storage.ReplayDeadLetters(), Is.EqualTo((2, 0)));
+        Assert.That(_storage.ReplayDeadLetters().Returned, Is.EqualTo(2));
         Assert.That(_storage.Process(Now), Is.EqualTo(2));
         Assert.That(Scalar("SELECT COUNT(DISTINCT id) FROM telemetry WHERE done IS NOT NULL"), Is.EqualTo(2));
     }
@@ -154,9 +154,64 @@ public sealed class ProcessingTests
         _storage.RecordHook = null;
         // The source retried the same event after it left the inbox.
         Assert.That(_storage.Ingest(_busy, [item], false, Now), Is.EqualTo(1));
-        Assert.That(_storage.ReplayDeadLetters(), Is.EqualTo((0, 1)));
+        Assert.That(_storage.ReplayDeadLetters().Duplicates, Is.EqualTo(1));
         Assert.That(Scalar("SELECT COUNT(*) FROM telemetry"), Is.EqualTo(1), "The duplicate event id is not inserted twice.");
         Assert.That(Scalar("SELECT COUNT(*) FROM dead_letters"), Is.Zero);
+    }
+
+    [Test]
+    public void ReplayLeavesHeadroomForLiveIngestAndResumesAfterDrain()
+    {
+        _options.InboxMaximum = 100;
+        _storage.RecordHook = _ => throw new InvalidOperationException("synthetic defect");
+        _storage.Ingest(_quiet, Enumerable.Range(0, 20).Select(_ => Event()), false, Now);
+        Assert.That(_storage.Process(Now), Is.EqualTo(20));
+        _storage.RecordHook = null;
+
+        Assert.That(_storage.Ingest(_busy, Enumerable.Range(0, 90).Select(_ => Event()), false, Now), Is.EqualTo(90));
+        var deferred = _storage.ReplayDeadLetters();
+        Assert.Multiple(() =>
+        {
+            Assert.That(deferred.Returned, Is.Zero);
+            Assert.That(deferred.Deferred, Is.EqualTo(20));
+            Assert.That(deferred.Remaining, Is.EqualTo(20));
+            Assert.That(deferred.PausedForDisk, Is.False);
+        });
+
+        Assert.That(_storage.Process(Now), Is.EqualTo(90));
+        var resumed = _storage.ReplayDeadLetters();
+        Assert.Multiple(() =>
+        {
+            Assert.That(resumed.Returned, Is.EqualTo(20));
+            Assert.That(resumed.Remaining, Is.Zero);
+            Assert.That(Scalar("SELECT COUNT(*) FROM telemetry WHERE done IS NULL"), Is.EqualTo(20));
+        });
+    }
+
+    [Test]
+    public void DelayedProcessingCreatesHistoricalIncidentWithoutPaging()
+    {
+        _options.Rules = [new()
+        {
+            Kind = "api", MinimumSamples = 3, MinimumFailures = 2, FailurePercent = 50, WindowMinutes = 5
+        }];
+        _options.Webhooks = [new()
+        {
+            Name = "on-call", Url = "https://alerts.example.test", Severities = ["high"]
+        }];
+        var events = new[] { Event(), Event() with { Outcome = "failure" }, Event() with { Outcome = "failure" } };
+        _storage.Ingest(_busy, events, false, Now);
+
+        Assert.That(_storage.Process(Now.AddMinutes(11)), Is.EqualTo(3));
+        var filter = new QueryFilter([_busy], Now.AddHours(-24).ToUnixTimeMilliseconds(),
+            Now.AddMinutes(12).ToUnixTimeMilliseconds(), null, 100, 0, null, null, null, null);
+        var incident = _storage.Incidents(filter).Single();
+        Assert.Multiple(() =>
+        {
+            Assert.That(incident.Status, Is.EqualTo("Open"));
+            Assert.That(incident.Evidence, Does.Contain("Historical evaluation"));
+            Assert.That(Scalar("SELECT COUNT(*) FROM alert_deliveries"), Is.Zero);
+        });
     }
 
     [Test]
@@ -195,6 +250,43 @@ public sealed class ProcessingTests
         _storage.RecordHook = null;
         _storage.Retain(Now.AddDays(_options.RetentionDays + 1));
         Assert.That(Scalar("SELECT COUNT(*) FROM dead_letters"), Is.Zero);
+    }
+
+    [Test]
+    public void RawRetentionSweepIsBoundedAndProgressesAcrossKinds()
+    {
+        long received = Now.AddDays(-40).ToUnixTimeMilliseconds();
+        using (var connection = _storage.Open())
+        using (var transaction = connection.BeginTransaction())
+        using (var insert = connection.Command(transaction, """
+                   INSERT INTO telemetry(application,environment,id,occurred,received,version,session_id,kind,name,
+                       outcome,anonymous,done)
+                   VALUES('busy','production',$id,$received,$received,'1.0.0',$session,$kind,'report','failure',0,$done)
+                   """, ("$id", ""), ("$received", received), ("$session", Guid.NewGuid().ToString("D")),
+            ("$kind", "api"), ("$done", received)))
+        {
+            for (int i = 0; i < Storage.RawRetentionBatch + 1_000; i++)
+            {
+                insert.Parameters["$id"].Value = Guid.NewGuid().ToString("D");
+                insert.Parameters["$session"].Value = Guid.NewGuid().ToString("D");
+                insert.Parameters["$kind"].Value = i % 2 == 0 ? "api" : "error";
+                insert.ExecuteNonQuery();
+            }
+            transaction.Commit();
+        }
+
+        Assert.That(System.Text.Json.JsonSerializer.SerializeToElement(_storage.PlatformHealth(Now))
+            .GetProperty("expiredRawRows").GetInt64(), Is.EqualTo(Storage.RawRetentionBatch + 1_000));
+        Assert.That(_storage.Retain(Now), Is.EqualTo(Storage.RawRetentionBatch));
+        Assert.Multiple(() =>
+        {
+            Assert.That(Scalar("SELECT COUNT(*) FROM telemetry"), Is.EqualTo(1_000));
+            Assert.That(Scalar("SELECT COUNT(DISTINCT kind) FROM telemetry"), Is.EqualTo(2),
+                "The oldest-first bounded sweep makes progress across eligible kinds.");
+            Assert.That(System.Text.Json.JsonSerializer.SerializeToElement(_storage.PlatformHealth(Now))
+                .GetProperty("expiredRawRows").GetInt64(), Is.EqualTo(1_000));
+        });
+        Assert.That(_storage.Retain(Now), Is.EqualTo(1_000));
     }
 
     private static TelemetryEvent Event() => new(Guid.NewGuid(), Now, "1.0.0", Guid.NewGuid(), "api", "report", "success", 120, 200);
