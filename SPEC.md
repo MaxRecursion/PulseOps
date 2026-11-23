@@ -1,6 +1,6 @@
 # PulseOps specification
 
-PulseOps helps internal support teams detect failures in Blazor WebAssembly apps and follow evidence from an operational dashboard to dependency, incident, trace and session records. DataCat's publicly documented metrics, logs, tracing, dashboards and monitor workflows informed functional scope. Original Blazor instrumentation and support workflows center on pre-runtime startup, browser-safe telemetry and SAP client observations.
+PulseOps helps internal support teams detect failures in Blazor WebAssembly apps and follow evidence from an operational dashboard to dependency, incident, trace and session records. The product provides metrics, logs, tracing, dashboards and monitor workflows. Original Blazor instrumentation and support workflows center on pre-runtime startup, browser-safe telemetry and enterprise client observations.
 
 ## P0
 

@@ -1,6 +1,4 @@
-// Adapted from DataCat artifacts/api-server/src/query/search.ts at
-// c016efb70de792f5beeb7b2d1266830087910343, Copyright 2026 The DataCat authors.
-// Modified for .NET, fixed telemetry fields, bounded parsing and SQLite. Apache-2.0.
+// PulseOps implementation for fixed telemetry fields, bounded parsing and SQLite.
 using System.Globalization;
 using System.Text.RegularExpressions;
 

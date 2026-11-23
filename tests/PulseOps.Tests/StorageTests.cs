@@ -178,7 +178,7 @@ public sealed class StorageTests
     }
 
     [Test]
-    public void DataCatBooleanSearchMatchesOnlyVisibleParameterizedEvents()
+    public void BooleanSearchMatchesOnlyVisibleParameterizedEvents()
     {
         _storage.Ingest(_production, [Event(false), Event(true)], false, Now);
         _storage.Ingest(_staging, [Event(true)], false, Now);

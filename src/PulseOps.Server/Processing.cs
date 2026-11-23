@@ -439,9 +439,7 @@ public sealed partial class Storage
         return latest.ExecuteScalar() is 1L;
     }
 
-    // Recovery thresholds adapt DataCat's stateFor in artifacts/api-server/src/jobs/monitors.ts
-    // at c016efb70de792f5beeb7b2d1266830087910343 (Copyright 2026 The DataCat authors, Apache-2.0).
-    // PulseOps requires consecutive, fully observed windows after the active incident was opened.
+    // Recovery requires consecutive fully observed healthy windows after the active incident was opened.
     private void TryRecover(SqliteConnection connection, SqliteTransaction transaction, PendingItem item,
         DetectionRule rule, string id, string assignee, double threshold, DateTimeOffset now)
     {

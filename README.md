@@ -98,7 +98,7 @@ sequenceDiagram
     DB-->>Worker: Complete transaction
 ```
 
-For detailed decisions and DataCat attribution, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For detailed implementation decisions, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Repository layout
 
@@ -118,7 +118,6 @@ For detailed decisions and DataCat attribution, see [ARCHITECTURE.md](ARCHITECTU
 │   ├── windows/               Windows Service/IIS deployment scripts
 │   └── teamcity/              Build and Artifactory guidance
 ├── docs/                      Operations, SDK, security and support guides
-├── third_party/datacat/       Upstream license and attribution
 └── artifacts/                 Generated local build or release output
 ```
 
@@ -449,7 +448,7 @@ In production, do not treat live-only health as sufficient for load-balancer rou
 
 ## Documentation
 
-- [Architecture and DataCat parity](ARCHITECTURE.md)
+- [Architecture](ARCHITECTURE.md)
 - [Local performance benchmark](docs/Performance.md)
 - [Windows operations and recovery](docs/Operations.md)
 - [Staging acceptance and capacity tests](docs/Staging.md)

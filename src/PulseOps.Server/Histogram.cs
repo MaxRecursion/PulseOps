@@ -1,7 +1,5 @@
-// Adapted from DataCat artifacts/api-server/src/query/apmStats.ts (bucketOf, valueOf, Hist) at
-// c016efb70de792f5beeb7b2d1266830087910343, Copyright 2026 The DataCat authors.
-// Modified for .NET, millisecond durations, nearest-rank quantiles with observed-maximum clamping and a strictly
-// validated binary encoding stored in SQLite. Apache-2.0.
+// PulseOps implementation for millisecond durations, nearest-rank quantiles with observed-maximum clamping
+// and strictly validated binary encoding stored in SQLite.
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -57,7 +55,7 @@ internal sealed class LatencyHistogram
 
     /// <summary>
     /// The p-quantile (0 ≤ p ≤ 1) as a bucket midpoint, clamped to <paramref name="observedMax"/> when given, or null when
-    /// empty. Deliberately deviates from DataCat's rank p·(n-1): PulseOps uses nearest rank, the first bucket whose cumulative
+    /// empty. PulseOps uses nearest rank, the first bucket whose cumulative
     /// count reaches max(1, ceil(p·n)), so long-range values align with the exact nearest-rank percentiles that the raw-data
     /// queries compute with (n·P+99)/100.
     /// </summary>
