@@ -452,16 +452,18 @@ In production, do not treat live-only health as sufficient for load-balancer rou
 - [Local performance benchmark](docs/Performance.md)
 - [Windows operations and recovery](docs/Operations.md)
 - [Staging acceptance and capacity tests](docs/Staging.md)
-- [Blazor SDK integration](docs/SDK.md)
+- [Integrate and verify the SDK in an existing Blazor WebAssembly application](docs/SDK.md)
 - [Telemetry and storage contract](docs/Telemetry.md)
 - [Security threat model](docs/Security.md)
-- [Support investigation guide](docs/Support.md)
+- [Create a filtered report for a Blazor application](docs/Support.md#create-a-custom-report-for-a-blazor-app)
+- [Production application onboarding](docs/Operations.md#onboard-a-monitored-blazor-application)
+- [Production FAQ](docs/Operations.md#production-faq)
 - [TeamCity and Artifactory](deployment/teamcity/README.md)
 - [Dependencies](docs/Dependencies.md)
 - [Implementation status and rollout limitations](IMPLEMENTATION_STATUS.md)
 
 ## Security and privacy
 
-PulseOps excludes raw payloads, browser identifiers, identity attributes, HTTP headers, URL parameters and query strings from telemetry. Use the SDK's allowlisted endpoint and operation aliases. All browser telemetry should pass through an authenticated same-origin relay in production. Machine credentials must remain server-side.
+PulseOps excludes raw payloads, browser identifiers, identity attributes, HTTP headers, URL parameters and query strings from telemetry. Use the SDK's allowlisted endpoint and operation aliases. Send managed browser telemetry through an authenticated same-origin relay in production. The optional anonymous startup route uses an exact origin allowlist and a restricted event schema. Machine credentials remain server-side.
 
 Before production rollout, complete HTTPS certificate validation, OIDC claim and deprovisioning testing, ACL review, backup and restore rehearsal, capacity testing and security acceptance. Demo configuration and synthetic data do not establish production readiness.

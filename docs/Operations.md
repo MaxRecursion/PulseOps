@@ -114,7 +114,7 @@ Use a dedicated Windows Server with local NTFS storage. PulseOps runs as one ASP
    & $pulseOpsInstall Start -HealthUrl $pulseOpsOrigin
    ```
 
-8. Open the HTTPS portal and confirm that both the administrator and the scoped user receive their intended access. Verify that the scoped user receives no events from a fixture application outside their OIDC groups. Configure the monitored application's server relay and SDK, send an approved dry-run event, and confirm it appears in the selected application/environment. Configure independent HTTPS probes for `/health/live` and `/health/ready`. [SDK setup](SDK.md)
+8. Open the HTTPS portal and confirm that both the administrator and the scoped user receive their intended access. Verify that the scoped user receives no events from a fixture application outside their OIDC groups. Configure independent HTTPS probes for `/health/live` and `/health/ready`. Follow the [Blazor application onboarding procedure](#onboard-a-monitored-blazor-application) for each application that will send telemetry.
 
 `NT SERVICE\PulseOps` has read and execute permissions for binaries, read permissions for private configuration, and modify permissions for SQLite files and Data Protection keys. The managed data directory and key directory are inherited by their contents. If a private config file was replaced, run the managed `Start` operation to reapply its access rules. Existing processes load config on startup. Use `Stop` then `Start` for config changes. With a custom `-Root`, set the two config paths to that root's `data\pulseops.db` and `keys` entries. Supply `-Root` consistently to operations commands. [Windows virtual service identities](https://learn.microsoft.com/windows/security/identity-protection/access-control/service-accounts)
 
@@ -133,6 +133,13 @@ Assign operator roles and group claims at the identity provider. Each non-admini
 Add an entry to `Scopes` for each application and environment combination. Use lowercase slug identifiers up to 40 characters and explicit telemetry aliases. Give each combination a distinct random ingest token, with at least 32 characters. Send ordinary browser telemetry to an authenticated same-origin relay in the monitored application. The relay must bind the application/environment on the server, check CSRF and body size, and attach the token on its outgoing HTTPS request to PulseOps. The demo relay is an integration sample for local use. Register the SDK’s session, error and metric names for enabled captures as shown in the example. A single unregistered alias causes the collector to reject the whole batch. Keep `StartupOrigins` empty unless you intend to collect restricted anonymous milestones. When enabled, register each exact HTTPS origin with no trailing slash.
 
 Use ASP.NET Core environment keys such as `PulseOps__Auth__ClientSecret` and `PulseOps__Scopes__0__IngestToken` for an approved secret injection mechanism. The private JSON provider takes precedence over bundled defaults and environment values override the private file. When using the Windows wrapper, keep the machine environment neutral for the managed database/key paths, processing topology, and runtime environment selection. Restart the affected processes after config or secret changes. Keep secrets out of release archives, terminal transcripts, screenshots, logs, and browser assets.
+
+### Onboard a monitored Blazor application
+
+1. The PulseOps operator registers the application and environment, agrees on the telemetry aliases with the application owner, and grants the support group view access. Register staging and production as separate scopes. Provision each scope's machine credential directly to its relay owner through the approved secret process.
+2. The application owner adds the SDK to the existing .NET 10 Blazor WebAssembly project. The relay owner configures an authenticated POST on the application origin, binds the scope server-side, and forwards to the collector over HTTPS. Start with one instrumented API client and one business operation in staging. Enable other signal types and approve their aliases as needed. [SDK integration and verification](SDK.md)
+3. In a fresh staging tab, perform an approved synthetic action. Verify a 202 returned by the application relay and find the matching processed observation in **Event explorer** with the intended **Application**, **Environment**, and **Version**. Check that a scoped support account can read it and that an account outside the scope cannot. In staging, exercise an authorized failure and confirm that the business app remains usable when telemetry transport is unavailable.
+4. Record the application and SDK versions, scope, test time in UTC, aliases, HTTP status, and scoped portal view in the release evidence. Keep raw request data and credentials out of the evidence. Repeat a known-good check after production approval using an approved dry-run action. Give support a filtered portal link and the relay owner's contact. [Application reporting and investigation](Support.md#create-a-custom-report-for-a-blazor-app)
 
 ### Worker topology and probes
 
@@ -323,9 +330,39 @@ Use one HTTPS IIS site at the host root. Install IIS, Management Scripts and Too
 
 - Install, start, stop, and recover the Windows services on a representative host. Document applicable machine GPOs, certificate private-key ACLs, Event Log source, and a tested exit procedure.
 - Verify OIDC login, failed login, logout behavior, session expiry, claim emission, allowed-scope reads and writes, cross-scope denial, and secret rotation with the enterprise provider.
-- Prove the safe relay, input rejection, fail-open client behavior, and rate limiting through the actual reverse proxy and monitored workload.
+- Prove the safe relay, input rejection, fail-open client behavior, and rate limiting through the actual reverse proxy and monitored workload. Record an accepted batch and its matching processed event for each application being onboarded. [Blazor application onboarding](#onboard-a-monitored-blazor-application)
 - Test a verified offline restore and a release rollback. Measure readiness recovery, queue backlog, disk pressure thresholds, and diagnostic visibility after a restart.
 - Measure the target concurrency, peak throughput, dashboard latency, and storage growth on the chosen host. Archive the test method and results with the release. [Local benchmark and commands](Performance.md)
 - Record security, operational, dependency approval and change-management sign-off for the intended environment.
 
 Windows service registration, IIS configuration, and enterprise OIDC tests require a representative Windows environment and identity provider. Consult [implementation status](../IMPLEMENTATION_STATUS.md) for repository-level validation.
+
+## Production FAQ
+
+### Can a static Blazor WebAssembly site send managed telemetry?
+
+Yes. Serve an authenticated relay through the site's own origin, for example through the application's backend or gateway. The browser SDK uses that route with the application's session. The relay supplies the collector's scope credential from its server-side secret store. Optional anonymous startup reporting uses its own collector route with an exact origin allowlist and a restricted event schema. [Configure the app-owned relay](SDK.md#configure-the-app-owned-relay)
+
+### How do I know the SDK is working end to end?
+
+Generate a known staging operation in a fresh browser tab. Look for HTTP 202 on the application relay request, then open **Event explorer** and match the event type, alias, version and UTC time in the registered scope. The 202 proves durable intake when the relay forwards the collector result. The matching portal event proves the worker processed it and the operator can see it. [Intake contract](Telemetry.md#batch-contract) · [Staging verification procedure](SDK.md#verify-the-integration-in-staging)
+
+### Why did a batch return 202 while the portal looks empty?
+
+Check the app, environment, version and time filters, then refresh. In the collector response, `accepted: 0` with a positive `duplicates` count means the IDs were already received. A batch with new receipts can still be waiting for processing. Ask a platform administrator to check **Platform health** for the worker heartbeat and oldest pending item. If the application or environment is missing from the picker, verify scope registration and the signed-in operator's role and group claims. [Health and first response](#health-and-first-response) · [Identity and application registration](#identity-and-application-registration)
+
+### Why is there an event but no incident?
+
+An incident requires a matching rule and enough qualifying observations in its window. A single dry run verifies telemetry delivery. Check the rule's scope, alias, minimum sample and failure counts, and threshold. Anonymous startup observations are excluded from trusted incident evaluation. [Health and first response](#health-and-first-response) · [Configure monitors and probes](#configure-monitors-and-probes)
+
+### Can I create a custom report for one application?
+
+Select its **Application** and **Environment**, set the **Time range** and optional **Version**, then choose the view that answers the question. Use **Overview** for overall health, **API explorer** for endpoint aliases, **Event explorer** for matching observations, and **History** for trends over longer periods. Bookmark or share the resulting URL with an authorized teammate. The link reruns the selected filters against a rolling window. Named reports, custom widgets, scheduled delivery, and telemetry CSV export are outside the current dashboard feature set. [Application reporting and drill-down](Support.md#create-a-custom-report-for-a-blazor-app)
+
+### Why do dashboard counts differ from the application's business totals?
+
+The portal counts processed telemetry observations. Sampling, capture flags, network interruptions, and the selected filters affect coverage. An operation alias reports outcome and duration without collecting the report output or financial data. Use the application's approved system of record for business totals. [SDK event fields](SDK.md#what-the-sdk-records) · [Scope and time ranges](Support.md#scope-and-time-ranges)
+
+### Will unsent telemetry survive a browser reload?
+
+The current SDK queue is bounded and in memory. Transient failures can retry while the tab is alive. Closing or reloading a tab can lose queued observations. Verify fail-open behavior in staging by blocking only the telemetry route and repeating a safe business action. [SDK reliability and rollout](SDK.md#reliability-and-rollout)
