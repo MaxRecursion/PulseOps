@@ -34,7 +34,8 @@ public sealed record PlatformHealth(long Pending, DateTimeOffset? OldestPendingA
     DateTimeOffset? WorkerHeartbeat, long DatabaseBytes, long NotificationFailures = 0, long NotificationsPending = 0,
     long RollupBackfillRemaining = 0, long MonitorsAlerting = 0, long PendingChanges = 0, long AuditEntries = 0,
     long? FreeDiskBytes = null, long ProcessWorkingSetBytes = 0, double ProcessCpuSeconds = 0,
-    DateTimeOffset? ProcessStartedAt = null, long ExpiredRawRows = 0, DateTimeOffset? OldestExpiredRawAt = null);
+    DateTimeOffset? ProcessStartedAt = null, long ExpiredRawRows = 0, DateTimeOffset? OldestExpiredRawAt = null,
+    double RawRetentionLagSeconds = 0, long NotificationsDeferred = 0);
 
 [JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]
 [JsonSerializable(typeof(PortalContext))]

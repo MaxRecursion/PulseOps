@@ -40,8 +40,11 @@ public sealed partial class Storage
         using var command = db.Command(transaction, $"""
             SELECT application, environment, name, revision, change_id, definition
             FROM monitor_policies WHERE {filter.ScopeClause}
+            ORDER BY application, environment, name LIMIT $limit
             """);
         filter.Bind(command);
+        // Approval keeps stored policies within the budget; the limit also bounds a restored or hand-edited database.
+        command.Parameters["$limit"].Value = MaximumManagedMonitors;
         using var rows = command.ExecuteReader();
         while (rows.Read())
         {

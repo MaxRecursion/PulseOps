@@ -21,6 +21,7 @@ The staging runner needs the .NET 10 runtime and HTTPS access to the staging ins
 ./deployment/windows/Invoke-StagingAcceptance.ps1 `
     -BaseUrl 'https://pulseops-staging.internal.example' -Application staging-smoke `
     -Environment staging -TokenVariable PULSEOPS_STAGING_TOKEN `
+    -ManifestPath ./manifest.json `
     -ResultsDirectory 'C:\PulseOpsEvidence\release-acceptance' -SoakMinutes 60
 ```
 

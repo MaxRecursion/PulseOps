@@ -110,9 +110,18 @@
 
     private string Note(string id) => _notes.TryGetValue(id, out var note) ? note : "";
 
-    private Task DecideAsync(ConfigChange change, bool approve) => RunAsync(change,
-        token => Api.DecideChangeAsync(change.Id, approve, Note(change.Id), Context.CsrfToken, token),
-        (approve ? "Approved: " : "Rejected: ") + ChangeText.Title(change) + ".");
+    private Task DecideAsync(ConfigChange change, bool approve)
+    {
+        // The server rejects multi-line or overlong notes; say so before posting instead of after.
+        if (MonitorRules.NoteProblem(Note(change.Id)) is { } problem)
+        {
+            _errors[change.Id] = problem;
+            return Task.CompletedTask;
+        }
+        return RunAsync(change,
+            token => Api.DecideChangeAsync(change.Id, approve, Note(change.Id), Context.CsrfToken, token),
+            (approve ? "Approved: " : "Rejected: ") + ChangeText.Title(change) + ".");
+    }
 
     private Task WithdrawAsync(ConfigChange change) => RunAsync(change,
         token => Api.WithdrawChangeAsync(change.Id, Context.CsrfToken, token), "Withdrawn: " + ChangeText.Title(change) + ".");

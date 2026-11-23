@@ -6,6 +6,7 @@ internal sealed class TelemetryBuffer(int capacity)
     private readonly object _gate = new();
     private readonly LinkedList<TelemetryEvent>[] _priorities = [new(), new(), new(), new(), new(), new()];
     private readonly Dictionary<Guid, int> _inFlight = [];
+    private bool _closed;
     private int _count;
     private long _queued;
     private long _accepted;
@@ -16,6 +17,9 @@ internal sealed class TelemetryBuffer(int capacity)
     {
         lock (_gate)
         {
+            if (_closed)
+                return 0;
+
             if (_count == capacity)
             {
                 var victim = Array.FindLastIndex(_priorities, queue => queue.Count != 0);
@@ -37,18 +41,28 @@ internal sealed class TelemetryBuffer(int capacity)
         }
     }
 
-    public List<TelemetryEvent> Take(int limit)
+    public List<TelemetryEvent> Take(int limit, DateTimeOffset now)
     {
         lock (_gate)
         {
             var result = new List<TelemetryEvent>(Math.Min(limit, _count));
-            foreach (var queue in _priorities)
+            var cutoff = now - MaximumPendingAge;
+            for (int priority = 0; priority < _priorities.Length && result.Count < limit; priority++)
             {
+                var queue = _priorities[priority];
                 while (result.Count < limit && queue.First is { } first)
                 {
                     queue.RemoveFirst();
-                    _inFlight.Add(first.Value.Id, Array.IndexOf(_priorities, queue));
-                    result.Add(first.Value);
+                    var item = first.Value;
+                    if (item.OccurredAt < cutoff)
+                    {
+                        _count--;
+                        _dropped++;
+                        continue;
+                    }
+
+                    _inFlight.Add(item.Id, priority);
+                    result.Add(item);
                 }
             }
             return result;
@@ -59,11 +73,13 @@ internal sealed class TelemetryBuffer(int capacity)
     {
         lock (_gate)
         {
-            foreach (var item in events.AsEnumerable().Reverse())
+            var cutoff = now - MaximumPendingAge;
+            for (int index = events.Count - 1; index >= 0; index--)
             {
+                var item = events[index];
                 if (!_inFlight.Remove(item.Id, out int priority))
                     continue;
-                if (item.OccurredAt < now - MaximumPendingAge)
+                if (item.OccurredAt < cutoff)
                 {
                     _count--;
                     _dropped++;
@@ -103,16 +119,16 @@ internal sealed class TelemetryBuffer(int capacity)
             return new(_queued, _accepted, _dropped, _retries, _count);
     }
 
-    public void Clear()
+    public void Close()
     {
         lock (_gate)
         {
+            _closed = true;
+            _dropped += _count;
+            _count = 0;
+            _inFlight.Clear();
             foreach (var queue in _priorities)
-            {
-                _dropped += queue.Count;
-                _count -= queue.Count;
                 queue.Clear();
-            }
         }
     }
 }

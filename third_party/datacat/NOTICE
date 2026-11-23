@@ -1,10 +1,17 @@
 DataCat
 Copyright 2026 The DataCat authors
 
-PulseOps contains modified, translated portions of DataCat's search compiler,
-from artifacts/api-server/src/query/search.ts and the recovery threshold in
-artifacts/api-server/src/jobs/monitors.ts at commit
-c016efb70de792f5beeb7b2d1266830087910343.
+PulseOps contains modified, translated portions of DataCat at commit
+c016efb70de792f5beeb7b2d1266830087910343:
+
+- the Boolean search compiler from artifacts/api-server/src/query/search.ts
+  (src/PulseOps.Server/EventSearch.cs);
+- the incident recovery threshold from artifacts/api-server/src/jobs/monitors.ts
+  (src/PulseOps.Server/Processing.cs);
+- the mergeable log-scale latency histogram (bucketOf, valueOf, Hist) from
+  artifacts/api-server/src/query/apmStats.ts, used for long-range rollups and
+  monitor baselines (src/PulseOps.Server/Histogram.cs).
+
 Upstream: https://github.com/replit/datacat
 
 The adapted code is licensed under Apache License, Version 2.0 (see LICENSE).

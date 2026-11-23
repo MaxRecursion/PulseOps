@@ -66,6 +66,12 @@ function Find-Harness {
     if ($candidates.Count -ne 1) {
         throw "Expected exactly one $Name.dll under $ToolsDirectory. Extract the complete release archive or supply -ToolsDirectory (see docs/Staging.md)."
     }
+    foreach ($suffix in '.deps.json', '.runtimeconfig.json') {
+        $companion = Join-Path $candidates[0].DirectoryName "$Name$suffix"
+        if (-not (Test-Path -LiteralPath $companion -PathType Leaf)) {
+            throw "Missing '$Name$suffix' next to '$Name.dll'. Use the full published harness directory."
+        }
+    }
     return $candidates[0].FullName
 }
 

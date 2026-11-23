@@ -7,7 +7,7 @@ Use this procedure before production approval to show that a published PulseOps 
 | Tool | Purpose |
 | --- | --- |
 | [`deployment/staging/StagingSmoke.cs`](../deployment/staging/StagingSmoke.cs) | Functional and security smoke. Local mode starts a disposable Production host over HTTPS with a generated certificate that only the harness trusts. It runs `--migrate`, probes liveness and readiness, checks security headers, operator authentication, intake authentication, cross-scope rejection, allowlists, anonymous-startup origin control, release markers, request size limits and malformed JSON. It then stops the host, takes a native backup, verifies and restores it, exports and verifies the audit chain, restarts the host, and proves durable deduplication after restart. Remote mode runs the same network checks against a staging URL with normal TLS validation. |
-| [`deployment/performance/Soak.cs`](../deployment/performance/Soak.cs) | Capacity soak. Local mode starts a disposable Development demo host with four generated scopes and 500 generated session IDs, then drives steady load, periodic bursts and dashboard queries, including history, monitors and audit. Remote mode sends ingest load only and never signs in as an operator. |
+| [`deployment/performance/Soak.cs`](../deployment/performance/Soak.cs) | Capacity soak. Local mode starts a disposable Development demo host with four generated scopes and 500 generated session IDs, then drives steady load, periodic bursts and dashboard queries, including history, monitors and audit. Remote mode sends successful ingest events only, so load testing never opens incidents or notifies real receivers on the staging scope, and it never signs in as an operator. |
 | [`deployment/windows/Invoke-StagingAcceptance.ps1`](../deployment/windows/Invoke-StagingAcceptance.ps1) | Windows wrapper for the staging host or a runner in the same network. It validates inputs, records environment evidence, runs the smoke and then the soak in remote mode, and writes reports, logs, a transcript and SHA-256 checksums to a new results directory. It never installs or changes services or IIS. |
 
 The harnesses are .NET 10 file-based applications without package dependencies. Credentials are read from environment variables named on the command line and are never printed or written to reports.
@@ -16,7 +16,7 @@ The harnesses are .NET 10 file-based applications without package dependencies. 
 
 - A staging deployment produced by the normal release process ([operations guide](Operations.md)), with HTTPS, the selected service topology and enterprise OIDC.
 - A staging application scope, for example `staging-smoke`/`staging`, whose `AllowedNames` include the synthetic event name (`smoke-check` by default). Provision its machine token, and optionally a token for a second scope to prove cross-scope rejection, through the approved secret store.
-- The .NET 10 runtime on the runner. Build the harnesses on the build agent:
+- The .NET 10 runtime on the runner. Extract the reviewed release archive and run the wrapper from it to use the bundled tools. To build the tools separately on a build agent, publish both harnesses and pass their shared output directory as `-ToolsDirectory`.
 
 ```sh
 dotnet publish deployment/staging/StagingSmoke.cs -c Release -o artifacts/staging-tools/smoke
@@ -30,7 +30,7 @@ $env:PULSEOPS_STAGING_TOKEN = '<staging token from the secret store>'
 $env:PULSEOPS_OTHER_SCOPE_TOKEN = '<token of another staging scope>'
 .\deployment\windows\Invoke-StagingAcceptance.ps1 -BaseUrl https://pulseops-staging.internal.example `
     -Application staging-smoke -Environment staging -TokenVariable PULSEOPS_STAGING_TOKEN `
-    -OtherTokenVariable PULSEOPS_OTHER_SCOPE_TOKEN -ToolsDirectory C:\PulseOpsTools `
+    -OtherTokenVariable PULSEOPS_OTHER_SCOPE_TOKEN -ManifestPath ./manifest.json `
     -ResultsDirectory C:\PulseOpsEvidence\staging-2026-11-22 -SoakMinutes 60
 ```
 

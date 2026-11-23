@@ -119,7 +119,15 @@ try {
         $application.VirtualDirectories['/'].PhysicalPath = $target
         $hostConfig = $manager.GetApplicationHostConfiguration()
         $filtering = $hostConfig.GetSection('system.webServer/security/requestFiltering', $siteName)
-        $filtering.GetChildElement('requestLimits')['maxAllowedContentLength'] = [uint32] 131072
+        # IIS is only a coarse outer bound. ASP.NET Core enforces the 128 KiB body limit and answers 413, as on Kestrel;
+        # IIS request filtering at that size would answer 404.13 instead.
+        $filtering.GetChildElement('requestLimits')['maxAllowedContentLength'] = [uint32] 1048576
+        try {
+            # IIS 10 version 1709 (Windows Server 2019) and later. Matches Kestrel, which sends no Server header.
+            $filtering['removeServerHeader'] = $true
+        } catch {
+            Write-Warning 'This IIS version cannot remove the Server header (IIS 10 version 1709 or later is required). The staging smoke reports the header.'
+        }
         $anonymous = $hostConfig.GetSection('system.webServer/security/authentication/anonymousAuthentication', $siteName)
         $anonymous['enabled'] = $true
         $anonymous['userName'] = ''

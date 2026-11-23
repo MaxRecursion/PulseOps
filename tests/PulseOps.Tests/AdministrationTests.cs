@@ -117,6 +117,24 @@ public sealed partial class AdministrationTests
     }
 
     [Test]
+    public void AuditPagesVerifyNewEntriesIncrementallyAndStillCatchAnAlteredAnchor()
+    {
+        var alice = Administrator("admin-alice");
+        Assert.That(_storage.ProposeChange(alice, Upsert(Policy("monitor-0")), Now).Status, Is.EqualTo(201));
+        Assert.That(_storage.AuditLog(alice, null, 100, 0)!.Chain, Is.EqualTo(Verify()), "First view verifies the full chain.");
+
+        for (int i = 1; i < 4; i++)
+            Assert.That(_storage.ProposeChange(alice, Upsert(Policy($"monitor-{i}")), Now).Status, Is.EqualTo(201));
+        var page = _storage.AuditLog(alice, null, 100, 0)!;
+        Assert.That(page.Chain, Is.EqualTo(new AuditChain(true, 4, AuditRows()[3].Hash, null)), "Appended entries are verified.");
+
+        // An edit of the last verified entry (possible only with the triggers dropped) is caught on the next view.
+        Execute("DROP TRIGGER audit_log_append_only_update");
+        Execute("UPDATE audit_log SET actor = 'mallory' WHERE seq = 4");
+        Assert.That(_storage.AuditLog(alice, null, 100, 0)!.Chain.BrokenAtSeq, Is.EqualTo(4));
+    }
+
+    [Test]
     public void AuditLogRejectsUpdatesAndDeletes()
     {
         Assert.That(_storage.ProposeChange(Administrator("admin-alice"), Upsert(Policy()), Now).Status, Is.EqualTo(201));
@@ -170,7 +188,9 @@ public sealed partial class AdministrationTests
             var proposedDetail = JsonDocument.Parse(audit[0].Detail).RootElement;
             Assert.That(proposedDetail.GetProperty("payloadSha256").GetString(),
                 Is.EqualTo(Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(payload)))));
-            Assert.That(proposedDetail.GetProperty("reason").GetString(), Is.EqualTo("Tighten the report latency objective"));
+            Assert.That(proposedDetail.TryGetProperty("reason", out _), Is.False,
+                "Free-text reasons stay in config_changes; the immutable chain never holds text that may need redaction.");
+            Assert.That(applied.Reason, Is.EqualTo("Tighten the report latency objective"));
             Assert.That(audit[1].Detail, Is.EqualTo("""{"entity":"monitor","operation":"upsert","target":"report-p95","revision":1}"""));
             Assert.That(Verify().Verified, Is.True);
         });
@@ -487,7 +507,7 @@ public sealed partial class AdministrationTests
     }
 
     [Test]
-    public void ApprovedMaintenanceSuppressesNotificationsUntilItEnds()
+    public void ApprovedMaintenanceDefersNotificationsUntilItEnds()
     {
         _options.Webhooks = [new() { Name = "internal", Url = "https://example.invalid/alerts" }];
         var (alice, bob) = (Administrator("admin-alice"), Administrator("admin-bob"));
@@ -500,21 +520,64 @@ public sealed partial class AdministrationTests
         Assert.Multiple(() =>
         {
             Assert.That(incident.Status, Is.EqualTo("Open"));
-            Assert.That(Scalar("SELECT COUNT(*) FROM alert_deliveries"), Is.Zero);
+            Assert.That(Text("SELECT group_concat(delivery_state) FROM alert_deliveries"), Is.EqualTo("deferred"));
             Assert.That(Text("SELECT group_concat(note, '|') FROM incident_history WHERE incident_id = $id", ("$id", incident.Id)),
-                Does.Contain($"Notifications suppressed by maintenance window {windowId}."));
-            Assert.That(_storage.ClaimAlert(during), Is.Null);
+                Does.Contain($"Notifications deferred until maintenance window {windowId} ends."));
+            Assert.That(_storage.ClaimAlert(during), Is.Null, "Nothing is delivered during the window.");
         });
 
-        var after = Now.AddMinutes(45);
+        // Still failing after the window: the deferred Open is released, not lost.
+        var after = Now.AddMinutes(31);
+        _storage.Retain(after);
+        var opened = _storage.ClaimAlert(after);
+        Assert.That((opened?.IncidentId, opened?.Status), Is.EqualTo((incident.Id, "Open")));
+        _storage.CompleteAlert(opened!, after, true, false);
+
         Assert.That(_storage.ChangeIncident(Filter(_production, after), incident.Id, new("Resolved", null, null), "operator-1", after),
             Is.EqualTo(204));
-        var delivery = _storage.ClaimAlert(after);
+        var resolved = _storage.ClaimAlert(after);
+        Assert.That((resolved?.Status, resolved?.Sequence > opened!.Sequence), Is.EqualTo(("Resolved", (bool?)true)));
+    }
+
+    [Test]
+    public void IncidentOpenedAndResolvedInsideMaintenanceNotifiesNobody()
+    {
+        _options.Webhooks = [new() { Name = "internal", Url = "https://example.invalid/alerts" }];
+        var (alice, bob) = (Administrator("admin-alice"), Administrator("admin-bob"));
+        Apply(alice, bob, Maintenance(_production, Now, Now.AddMinutes(30)));
+
+        var during = Now.AddMinutes(5);
+        _storage.Ingest(_production, [Event(false, during), Event(true, during), Event(true, during)], false, during);
+        _storage.Process(during);
+        var incident = _storage.Incidents(Filter(_production, during)).Single();
+        var resolvedAt = Now.AddMinutes(10);
+        Assert.That(_storage.ChangeIncident(Filter(_production, resolvedAt), incident.Id, new("Resolved", null, null), "operator-1",
+            resolvedAt), Is.EqualTo(204));
+
+        _storage.Retain(Now.AddMinutes(31));
         Assert.Multiple(() =>
         {
-            Assert.That(Scalar("SELECT COUNT(*) FROM alert_deliveries"), Is.EqualTo(1));
-            Assert.That((delivery?.IncidentId, delivery?.Status, delivery?.Destination), Is.EqualTo((incident.Id, "Resolved", "internal")));
+            Assert.That(_storage.ClaimAlert(Now.AddMinutes(31)), Is.Null, "The receiver was never paged, so it gets no resolution.");
+            Assert.That(Text("SELECT group_concat(status || ':' || delivery_state) FROM alert_deliveries"), Is.EqualTo("Open:suppressed"));
         });
+    }
+
+    [Test]
+    public void ResolutionDuringMaintenanceClosesAnAlertSentBeforeIt()
+    {
+        _options.Webhooks = [new() { Name = "internal", Url = "https://example.invalid/alerts" }];
+        _storage.Ingest(_production, [Event(false, Now), Event(true, Now), Event(true, Now)], false, Now);
+        _storage.Process(Now);
+        var opened = _storage.ClaimAlert(Now);
+        _storage.CompleteAlert(opened!, Now, true, false);
+        var incident = _storage.Incidents(Filter(_production, Now)).Single();
+
+        var (alice, bob) = (Administrator("admin-alice"), Administrator("admin-bob"));
+        Apply(alice, bob, Maintenance(_production, Now.AddMinutes(1), Now.AddMinutes(60)));
+        var during = Now.AddMinutes(10);
+        Assert.That(_storage.ChangeIncident(Filter(_production, during), incident.Id, new("Resolved", null, null), "operator-1", during),
+            Is.EqualTo(204));
+        Assert.That(_storage.ClaimAlert(during)?.Status, Is.EqualTo("Resolved"), "A page that was sent also gets its resolution.");
     }
 
     [Test]

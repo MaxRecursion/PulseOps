@@ -5,10 +5,7 @@
 <PageHeader Title="Change control" Section="Administration"
             Description="Propose, review and audit monitor and maintenance changes. Every proposal and decision is recorded in the hash-chained audit log.">
     <Actions>
-        @if (HasAccess)
-        {
-            <button type="button" class="button" @onclick="RefreshAsync" disabled="@Loading"><Icon Name="refresh" /> Refresh</button>
-        }
+        <button type="button" class="button" @onclick="RefreshAsync" disabled="@Loading"><Icon Name="refresh" /> Refresh</button>
     </Actions>
 </PageHeader>
 
@@ -18,14 +15,18 @@
         <div class="panel-head"><div><h2>Change control is not available for your role</h2><p>Access is decided by your organisation’s role assignments.</p></div></div>
         <p class="panel-copy">
             Proposing changes requires the Platform administrator or Application owner role. Reviewing the audit log requires the
-            Platform administrator or Read-only auditor role. You can follow monitor status on the
-            <a href="@Scope.Url("monitors")">Monitors</a> page.
+            Platform administrator or Read-only auditor role. Maintenance windows in your scopes are listed below, and you can
+            follow monitor status on the <a href="@Scope.Url("monitors")">Monitors</a> page.
         </p>
     </section>
 }
-else if (!_loaded)
+@if (!_loaded)
 {
     <DataState Loading="Loading" Error="@Error" SignIn="SignInRequired" Retry="RefreshAsync" />
+}
+else if (!HasAccess)
+{
+    <MaintenancePanel Windows="_maintenance" Proposed="ReloadAsync" />
 }
 else
 {
@@ -94,13 +95,13 @@ else
 
     protected override async Task LoadAsync(CancellationToken cancellationToken)
     {
-        if (!HasAccess)
-            return;
-
-        // Sequential on purpose: the query rate limiter admits only a few concurrent requests.
-        var pending = await Api.GetAsync("admin/changes?status=pending&limit=50&offset=0", AdminJson.Default.ConfigChangeArray, cancellationToken);
-        var recent = await Api.GetAsync("admin/changes?status=all&limit=20&offset=0", AdminJson.Default.ConfigChangeArray, cancellationToken);
+        // Sequential on purpose: the query rate limiter admits only a few concurrent requests. Every operator may read
+        // maintenance windows; change and audit queries are made only for the roles that may use them.
         var maintenance = await Api.GetAsync("admin/maintenance?includeEnded=false", AdminJson.Default.MaintenanceWindowArray, cancellationToken);
+        ConfigChange[] pending = HasAccess
+            ? await Api.GetAsync("admin/changes?status=pending&limit=50&offset=0", AdminJson.Default.ConfigChangeArray, cancellationToken) : [];
+        ConfigChange[] recent = HasAccess
+            ? await Api.GetAsync("admin/changes?status=all&limit=20&offset=0", AdminJson.Default.ConfigChangeArray, cancellationToken) : [];
         MonitorStatus[] monitors = Context.CanPropose
             ? await Api.GetAsync("monitors", AdminJson.Default.MonitorStatusArray, cancellationToken) : [];
         var audit = Context.CanAudit

@@ -153,10 +153,30 @@ public static class MonitorRules
         return null;
     }
 
-    /// <summary>Reason text shared by every proposal form.</summary>
-    public static string? ReasonProblem(string? reason) => string.IsNullOrWhiteSpace(reason)
-        ? "Enter a reason for the reviewer."
-        : reason.Trim().Length > 500 ? "Keep the reason within 500 characters." : null;
+    /// <summary>
+    /// Reason text shared by every proposal form. Mirrors the server: trimmed, at least 3 characters, no control
+    /// characters (line breaks or tabs) and at most <paramref name="maximum"/> characters.
+    /// </summary>
+    public static string? ReasonProblem(string? reason, int maximum = 500)
+    {
+        var text = reason?.Trim() ?? "";
+        if (text.Length == 0)
+            return "Enter a reason for the reviewer.";
+        if (text.Any(char.IsControl))
+            return "Write the reason on one line, without line breaks or tabs.";
+        if (text.Length < 3)
+            return "Enter a reason of at least 3 characters.";
+        return text.Length > maximum ? $"Keep the reason within {maximum} characters." : null;
+    }
+
+    /// <summary>Optional decision note: one line of at most 500 characters, as the server requires.</summary>
+    public static string? NoteProblem(string? note)
+    {
+        var text = note?.Trim() ?? "";
+        if (text.Any(char.IsControl))
+            return "Write the decision note on one line, without line breaks or tabs.";
+        return text.Length > 500 ? "Keep the decision note within 500 characters." : null;
+    }
 }
 
 public static class MonitorText

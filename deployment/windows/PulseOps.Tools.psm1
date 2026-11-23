@@ -4,7 +4,8 @@ function Invoke-PulseProcess {
     param(
         [Parameter(Mandatory)] [string] $FilePath,
         [Parameter(Mandatory)] [string[]] $Arguments,
-        [switch] $ProductionHost
+        [switch] $ProductionHost,
+        [ValidateRange(1, 86400)] [int] $TimeoutSeconds
     )
 
     $processInfo = [Diagnostics.ProcessStartInfo]::new($FilePath)
@@ -32,7 +33,18 @@ function Invoke-PulseProcess {
 
     $process = [Diagnostics.Process]::Start($processInfo)
     try {
-        $process.WaitForExit()
+        if (-not $TimeoutSeconds) {
+            $process.WaitForExit()
+        } elseif (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill($true) } catch {
+                if (-not $process.HasExited) {
+                    throw [TimeoutException]::new("'$(Split-Path -Leaf $FilePath)' timed out and could not be stopped. Confirm it has exited before retrying.")
+                }
+            }
+            $exited = $process.WaitForExit(5000)
+            $outcome = if ($exited) { 'The process was stopped.' } else { 'Confirm the process has exited before retrying.' }
+            throw [TimeoutException]::new("'$(Split-Path -Leaf $FilePath)' exceeded $TimeoutSeconds seconds. $outcome")
+        }
         if ($process.ExitCode -ne 0) {
             throw "'$(Split-Path -Leaf $FilePath)' exited with code $($process.ExitCode)."
         }

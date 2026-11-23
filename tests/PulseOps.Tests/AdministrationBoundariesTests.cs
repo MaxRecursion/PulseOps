@@ -57,6 +57,20 @@ public sealed partial class AdministrationTests
     }
 
     [Test]
+    public void ConfigurationMonitorsShareTheEvaluationBudget()
+    {
+        var maker = Administrator("maker");
+        var checker = Administrator("checker");
+        _options.Monitors = [.. Enumerable.Range(0, 299).Select(i => Policy($"configured-{i}"))];
+        Apply(maker, checker, Upsert(Policy("managed-1")));
+        var over = _storage.ProposeChange(maker, Upsert(Policy("managed-2")), Now).Id!;
+
+        Assert.That(_storage.ApproveChange(checker, over, null, Now), Is.EqualTo(ChangeOutcome.Conflict("managed_monitor_limit")),
+            "299 configured plus 1 approved policy already use the budget of 300.");
+        Assert.That(Scalar("SELECT COUNT(*) FROM monitor_policies"), Is.EqualTo(1));
+    }
+
+    [Test]
     public void ExplicitNullMonitorTargetReturnsAValidationError()
     {
         var invalid = Policy();

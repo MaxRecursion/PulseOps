@@ -131,8 +131,8 @@ public sealed class PulseOpsClient : IAsyncDisposable
         if (Interlocked.Exchange(ref _disabled, true))
             return;
 
+        _buffer.Close();
         _stop.Cancel();
-        _buffer.Clear();
     }
 
     internal bool IsIngestionRequest(Uri uri) =>
@@ -250,6 +250,7 @@ public sealed class PulseOpsClient : IAsyncDisposable
 
     private async Task PumpAsync(CancellationToken cancellationToken)
     {
+        int consecutiveFailures = 0;
         try
         {
             while (!cancellationToken.IsCancellationRequested)
@@ -257,31 +258,33 @@ public sealed class PulseOpsClient : IAsyncDisposable
                 await _flushSignal.WaitAsync(_options.FlushInterval, cancellationToken);
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    var events = _buffer.Take(_options.BatchSize);
+                    var events = _buffer.Take(_options.BatchSize, DateTimeOffset.UtcNow);
                     if (events.Count == 0)
                         break;
 
-                    BatchDisposition disposition;
+                    (BatchDisposition Disposition, TimeSpan? RetryAfter) result = (BatchDisposition.Rejected, null);
                     try
                     {
-                        disposition = await SendBatchAsync(events, cancellationToken);
+                        result = await SendBatchAsync(events, cancellationToken);
                     }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    finally
                     {
-                        _buffer.Processed(events, accepted: false);
-                        throw;
+                        if (result.Disposition == BatchDisposition.Retry)
+                            _buffer.Retry(events, DateTimeOffset.UtcNow);
+                        else
+                            _buffer.Processed(events, accepted: result.Disposition == BatchDisposition.Accepted);
                     }
 
-                    if (disposition == BatchDisposition.Accepted)
-                        _buffer.Processed(events, accepted: true);
-                    else if (disposition == BatchDisposition.Rejected)
-                        _buffer.Processed(events, accepted: false);
-                    else
+                    if (result.Disposition != BatchDisposition.Retry)
                     {
-                        _buffer.Retry(events, DateTimeOffset.UtcNow);
-                        await Task.Delay(_options.FlushInterval, cancellationToken);
-                        break;
+                        consecutiveFailures = 0;
+                        continue;
                     }
+
+                    double delay = Math.Min(Math.Max(500 << consecutiveFailures, result.RetryAfter?.TotalMilliseconds ?? 0), 30_000);
+                    consecutiveFailures = Math.Min(consecutiveFailures + 1, 6);
+                    _buffer.Retried();
+                    await Task.Delay(TimeSpan.FromMilliseconds(delay + Random.Shared.Next(100, 500)), cancellationToken);
                 }
             }
         }
@@ -290,77 +293,63 @@ public sealed class PulseOpsClient : IAsyncDisposable
         }
     }
 
-    private async Task<BatchDisposition> SendBatchAsync(List<TelemetryEvent> events, CancellationToken cancellationToken)
+    private async Task<(BatchDisposition Disposition, TimeSpan? RetryAfter)> SendBatchAsync(
+        List<TelemetryEvent> events, CancellationToken cancellationToken)
     {
-        var batch = new TelemetryBatch(1, _options.Application, _options.Environment, events);
-        var payload = JsonSerializer.SerializeToUtf8Bytes(batch, TelemetryJsonContext.Default.TelemetryBatch);
-        const int maxAttempts = 4;
-        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        try
         {
-            TimeSpan? retryAfter = null;
-            try
+            using var request = new HttpRequestMessage(HttpMethod.Post, _endpoint)
+                .SetBrowserRequestCredentials(BrowserRequestCredentials.SameOrigin)
+                .SetBrowserRequestMode(BrowserRequestMode.SameOrigin)
+                .SetBrowserRequestOption("redirect", "error");
+            if (_options.GetRelayAntiforgeryTokenAsync is { } getToken)
             {
-                using var request = new HttpRequestMessage(HttpMethod.Post, _endpoint)
-                    .SetBrowserRequestCredentials(BrowserRequestCredentials.SameOrigin)
-                    .SetBrowserRequestMode(BrowserRequestMode.SameOrigin)
-                    .SetBrowserRequestOption("redirect", "error");
-                if (_options.GetRelayAntiforgeryTokenAsync is { } getToken)
+                using var tokenTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                tokenTimeout.CancelAfter(TimeSpan.FromSeconds(1));
+                string? token;
+                try
                 {
-                    using var tokenTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                    tokenTimeout.CancelAfter(TimeSpan.FromSeconds(1));
-                    string? token;
-                    try
-                    {
-                        token = await getToken(tokenTimeout.Token).AsTask().WaitAsync(tokenTimeout.Token);
-                    }
-                    catch (Exception) when (!cancellationToken.IsCancellationRequested)
-                    {
-                        return BatchDisposition.Retry;
-                    }
-
-                    if (token is not { Length: > 0 and <= 4096 } ||
-                        token.Any(character => character is < '!' or > '~'))
-                        return BatchDisposition.Rejected;
-                    request.Headers.Add("X-CSRF-TOKEN", token);
+                    token = await getToken(tokenTimeout.Token).AsTask().WaitAsync(tokenTimeout.Token);
+                }
+                catch (Exception)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return (BatchDisposition.Retry, null);
                 }
 
-                request.Content = new ByteArrayContent(payload);
-                request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-                using var response = await _sender.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-                if (response.StatusCode == HttpStatusCode.Accepted)
-                    return BatchDisposition.Accepted;
-                if (response.StatusCode == HttpStatusCode.Gone)
-                {
-                    // Operator kill switch: intake for this application is suspended. Stop for this session.
-                    _ = Task.Run(Disable, CancellationToken.None);
-                    return BatchDisposition.Rejected;
-                }
-
-                if (response.StatusCode is not (HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests)
-                    && (int)response.StatusCode < 500)
-                {
-                    return BatchDisposition.Rejected;
-                }
-
-                var header = response.Headers.RetryAfter;
-                retryAfter = header?.Delta ?? header?.Date - DateTimeOffset.UtcNow;
-            }
-            catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
-                ex is (HttpRequestException or OperationCanceledException))
-            {
+                if (string.IsNullOrEmpty(token))
+                    return (BatchDisposition.Retry, null);
+                if (token.Length > 4096 || token.Any(character => character is < '!' or > '~'))
+                    return (BatchDisposition.Rejected, null);
+                request.Headers.Add("X-CSRF-TOKEN", token);
             }
 
-            if (attempt + 1 == maxAttempts)
-                break;
+            var batch = new TelemetryBatch(1, _options.Application, _options.Environment, events);
+            request.Content = new ByteArrayContent(JsonSerializer.SerializeToUtf8Bytes(batch, TelemetryJsonContext.Default.TelemetryBatch));
+            request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            using var response = await _sender.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (response.StatusCode == HttpStatusCode.Accepted)
+                return (BatchDisposition.Accepted, null);
+            if (response.StatusCode == HttpStatusCode.Gone)
+            {
+                // The collector suspended intake for this application for the rest of the session.
+                Disable();
+                return (BatchDisposition.Rejected, null);
+            }
 
-            var delay = retryAfter is { TotalMilliseconds: > 0 } serverDelay
-                ? Math.Min(serverDelay.TotalMilliseconds, 30_000)
-                : (500 << attempt) + Random.Shared.Next(100, 500);
-            _buffer.Retried();
-            await Task.Delay(TimeSpan.FromMilliseconds(delay), cancellationToken);
+            if (response.StatusCode is not (HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests)
+                && (int)response.StatusCode < 500)
+            {
+                return (BatchDisposition.Rejected, null);
+            }
+            var header = response.Headers.RetryAfter;
+            return (BatchDisposition.Retry, header?.Delta ?? header?.Date - DateTimeOffset.UtcNow);
         }
-
-        return BatchDisposition.Retry;
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
+            ex is (HttpRequestException or OperationCanceledException))
+        {
+            return (BatchDisposition.Retry, null);
+        }
     }
 
     private static Uri? ResolveEndpoint(string baseAddress, string endpoint)

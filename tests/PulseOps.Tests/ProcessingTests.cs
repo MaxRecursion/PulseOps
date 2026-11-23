@@ -189,7 +189,7 @@ public sealed class ProcessingTests
     }
 
     [Test]
-    public void DelayedProcessingCreatesHistoricalIncidentWithoutPaging()
+    public void HistoricalIncidentPagesOnceWhenFreshObservationsConfirmIt()
     {
         _options.Rules = [new()
         {
@@ -202,7 +202,8 @@ public sealed class ProcessingTests
         var events = new[] { Event(), Event() with { Outcome = "failure" }, Event() with { Outcome = "failure" } };
         _storage.Ingest(_busy, events, false, Now);
 
-        Assert.That(_storage.Process(Now.AddMinutes(11)), Is.EqualTo(3));
+        var catchup = Now.AddMinutes(11);
+        Assert.That(_storage.Process(catchup), Is.EqualTo(3));
         var filter = new QueryFilter([_busy], Now.AddHours(-24).ToUnixTimeMilliseconds(),
             Now.AddMinutes(12).ToUnixTimeMilliseconds(), null, 100, 0, null, null, null, null);
         var incident = _storage.Incidents(filter).Single();
@@ -211,6 +212,18 @@ public sealed class ProcessingTests
             Assert.That(incident.Status, Is.EqualTo("Open"));
             Assert.That(incident.Evidence, Does.Contain("Historical evaluation"));
             Assert.That(Scalar("SELECT COUNT(*) FROM alert_deliveries"), Is.Zero);
+        });
+
+        _storage = new Storage(_options);
+        var fresh = events.Select(item => item with { Id = Guid.NewGuid(), OccurredAt = catchup }).ToArray();
+        _storage.Ingest(_busy, fresh, false, catchup);
+        Assert.That(_storage.Process(catchup), Is.EqualTo(3));
+        _storage.Ingest(_busy, [Event() with { Outcome = "failure", OccurredAt = catchup }], false, catchup);
+        Assert.That(_storage.Process(catchup), Is.EqualTo(1));
+        Assert.Multiple(() =>
+        {
+            Assert.That(_storage.ClaimAlert(catchup)?.IncidentId, Is.EqualTo(incident.Id));
+            Assert.That(Scalar("SELECT COUNT(*) FROM alert_deliveries"), Is.EqualTo(1));
         });
     }
 
@@ -287,6 +300,24 @@ public sealed class ProcessingTests
                 .GetProperty("expiredRawRows").GetInt64(), Is.EqualTo(1_000));
         });
         Assert.That(_storage.Retain(Now), Is.EqualTo(1_000));
+    }
+
+    [Test]
+    public void RetentionHealthMeasuresOverdueTimeAgainstEachKindsCutoff()
+    {
+        var raw = Now.AddDays(-_options.RetentionDays).AddMinutes(-7);
+        var error = Now.AddDays(-_options.ErrorRetentionDays).AddMinutes(-2);
+        _storage.Ingest(_busy, [Event() with { OccurredAt = raw }], false, raw);
+        _storage.Ingest(_busy, [Event() with { Kind = "error", OccurredAt = error }], false, error);
+        _storage.Process(Now);
+
+        var health = System.Text.Json.JsonSerializer.SerializeToElement(_storage.PlatformHealth(Now));
+        Assert.Multiple(() =>
+        {
+            Assert.That(health.GetProperty("expiredRawRows").GetInt64(), Is.EqualTo(2));
+            Assert.That(health.GetProperty("oldestExpiredRawAt").GetDateTimeOffset(), Is.EqualTo(error));
+            Assert.That(health.GetProperty("rawRetentionLagSeconds").GetDouble(), Is.EqualTo(7 * 60));
+        });
     }
 
     private static TelemetryEvent Event() => new(Guid.NewGuid(), Now, "1.0.0", Guid.NewGuid(), "api", "report", "success", 120, 200);

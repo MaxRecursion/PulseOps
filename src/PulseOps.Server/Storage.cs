@@ -4,7 +4,7 @@ namespace PulseOps.Server;
 
 public sealed partial class Storage(PlatformOptions options)
 {
-    public const int SchemaVersion = 5;
+    public const int SchemaVersion = 6;
     private const int ApplicationId = 0x504f5053; // POPS
     private string FilePath => options.DatabasePath;
 
@@ -210,6 +210,14 @@ public sealed partial class Storage(PlatformOptions options)
                 """);
             migration.ExecuteNonQuery();
         }
+        if (version < 6)
+        {
+            // Per-incident, per-destination delivery order for the outbox (ClaimAlert) and maintenance deferral.
+            using var migration = connection.Command(transaction, """
+                CREATE INDEX IF NOT EXISTS alert_order ON alert_deliveries(incident_id, destination) WHERE delivery_state IN ('pending', 'deferred');
+                """);
+            migration.ExecuteNonQuery();
+        }
         if (version < SchemaVersion)
         {
             using var identify = connection.Command(transaction, $"PRAGMA application_id = {ApplicationId}; PRAGMA user_version = {SchemaVersion}");
@@ -268,11 +276,13 @@ public sealed partial class Storage(PlatformOptions options)
     {
         using var connection = OpenFile(Path.GetFullPath(path), SqliteOpenMode.ReadOnly);
         ValidateEngine(connection);
-        using var version = connection.Command(null, "PRAGMA user_version");
-        long schemaVersion = (long)version.ExecuteScalar()!;
-        ValidateIdentity(connection, null, schemaVersion);
         if (requireCurrentSchema)
             ValidateSchema(connection);
+        else
+        {
+            using var version = connection.Command(null, "PRAGMA user_version");
+            ValidateIdentity(connection, null, (long)version.ExecuteScalar()!);
+        }
         using var check = connection.Command(null, "PRAGMA integrity_check(1)");
         if ((string?)check.ExecuteScalar() != "ok")
             throw new InvalidOperationException("SQLite backup failed integrity verification.");
@@ -327,7 +337,9 @@ public sealed partial class Storage(PlatformOptions options)
             return null;
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
-        var (total, scoped) = PendingCounts(connection, transaction, scope.Application, scope.Environment);
+        int total = PendingCount(connection, transaction);
+        int scoped = PendingCount(connection, transaction, (scope.Application, scope.Environment));
+        int scopeMaximum = ScopeInboxMaximum(options.InboxMaximum);
         int accepted = 0;
         foreach (var item in events)
         {
@@ -346,23 +358,21 @@ public sealed partial class Storage(PlatformOptions options)
                 ("$anonymous", anonymous));
             accepted += insert.ExecuteNonQuery();
             if (accepted > 0 && (total + accepted > options.InboxMaximum ||
-                scoped + accepted > ScopeInboxMaximum(options.InboxMaximum)))
+                scoped + accepted > scopeMaximum))
                 return null;
         }
         transaction.Commit();
         return accepted;
     }
 
-    private static (int Total, int Scoped) PendingCounts(SqliteConnection connection, SqliteTransaction transaction,
-        string application, string environment)
+    private static int PendingCount(SqliteConnection connection, SqliteTransaction transaction,
+        (string Application, string Environment)? scope = null)
     {
-        using var pending = connection.Command(transaction, """
-            SELECT COUNT(*), COALESCE(SUM(application = $app AND environment = $env), 0)
-            FROM telemetry WHERE done IS NULL
-            """, ("$app", application), ("$env", environment));
-        using var counts = pending.ExecuteReader();
-        counts.Read();
-        return (counts.GetInt32(0), counts.GetInt32(1));
+        using var count = scope is { } key
+            ? connection.Command(transaction, "SELECT COUNT(*) FROM telemetry WHERE done IS NULL AND application=$app AND environment=$env",
+                ("$app", key.Application), ("$env", key.Environment))
+            : connection.Command(transaction, "SELECT COUNT(*) FROM telemetry WHERE done IS NULL");
+        return checked((int)(long)count.ExecuteScalar()!);
     }
 
     private static int ScopeInboxMaximum(int inboxMaximum) =>
@@ -386,7 +396,9 @@ public sealed partial class Storage(PlatformOptions options)
     {
         var evaluatedAt = now ?? DateTimeOffset.UtcNow;
         using var connection = Open();
-        using var statement = connection.Command(null, """
+        using var transaction = connection.BeginTransaction(deferred: true);
+        var (expiredRawRows, oldestExpired, retentionLag) = RawRetentionHealth(connection, transaction, evaluatedAt);
+        using var statement = connection.Command(transaction, """
             SELECT COUNT(*), MIN(received),
                 COALESCE((SELECT processed FROM worker_state WHERE id = 1), 0),
                 (SELECT heartbeat FROM worker_state WHERE id = 1),
@@ -397,13 +409,9 @@ public sealed partial class Storage(PlatformOptions options)
                 (SELECT COUNT(*) FROM monitor_state WHERE state = 'Alert'),
                 (SELECT COUNT(*) FROM config_changes WHERE status = 'Pending'),
                 (SELECT COUNT(*) FROM audit_log),
-                (SELECT COUNT(*) FROM telemetry expired WHERE done IS NOT NULL AND
-                    ((kind = 'error' AND received < $errorCutoff) OR (kind <> 'error' AND received < $rawCutoff))),
-                (SELECT MIN(received) FROM telemetry expired WHERE done IS NOT NULL AND
-                    ((kind = 'error' AND received < $errorCutoff) OR (kind <> 'error' AND received < $rawCutoff)))
+                (SELECT COUNT(*) FROM alert_deliveries WHERE delivery_state='deferred')
             FROM telemetry WHERE done IS NULL
-            """, ("$rawCutoff", evaluatedAt.AddDays(-options.RetentionDays).ToUnixTimeMilliseconds()),
-            ("$errorCutoff", evaluatedAt.AddDays(-options.ErrorRetentionDays).ToUnixTimeMilliseconds()));
+            """);
         using var rows = statement.ExecuteReader();
         rows.Read();
         using var process = System.Diagnostics.Process.GetCurrentProcess();
@@ -413,7 +421,9 @@ public sealed partial class Storage(PlatformOptions options)
             deadLetters = rows.GetInt64(5), notificationFailures = rows.GetInt64(4), notificationsPending = rows.GetInt64(6),
             workerHeartbeat = rows.NullableTime(3), rollupBackfillRemaining = rows.IsDBNull(7) ? 0 : rows.GetInt64(7),
             monitorsAlerting = rows.GetInt64(8), pendingChanges = rows.GetInt64(9), auditEntries = rows.GetInt64(10),
-            expiredRawRows = rows.GetInt64(11), oldestExpiredRawAt = rows.NullableTime(12),
+            notificationsDeferred = rows.GetInt64(11),
+            expiredRawRows, oldestExpiredRawAt = oldestExpired is long at ? DateTimeOffset.FromUnixTimeMilliseconds(at) : (DateTimeOffset?)null,
+            rawRetentionLagSeconds = retentionLag / 1_000d,
             databaseBytes = new[] { "", "-wal", "-shm" }.Sum(suffix =>
                 File.Exists(FilePath + suffix) ? new FileInfo(FilePath + suffix).Length : 0),
             freeDiskBytes = FreeDiskBytes(), processWorkingSetBytes = process.WorkingSet64,

@@ -25,7 +25,7 @@ else
     </section>
     <section class="stat-grid" aria-label="Operations metrics">
         <StatCard Label="Monitors alerting" Value="@Presentation.Count(_health.MonitorsAlerting)" Glyph="monitors" Description="Scheduled monitors in Alert" Tone="orange" />
-        <StatCard Label="Notifications" Value="@Presentation.Count(_health.NotificationsPending)" Glyph="clock" Description="@($"Pending delivery · {Presentation.Count(_health.NotificationFailures)} failed")" />
+        <StatCard Label="Notifications" Value="@Presentation.Count(_health.NotificationsPending)" Glyph="clock" Description="@($"Pending delivery · {Presentation.Count(_health.NotificationsDeferred)} deferred · {Presentation.Count(_health.NotificationFailures)} failed")" />
         <StatCard Label="Pending changes" Value="@Presentation.Count(_health.PendingChanges)" Glyph="admin" Description="Awaiting a second administrator" Tone="teal" />
         <StatCard Label="Audit entries" Value="@Presentation.Count(_health.AuditEntries)" Glyph="archive" Description="Hash-chained, append-only" Tone="blue" />
     </section>
@@ -61,7 +61,7 @@ else
             yield return "The processing worker has not reported within 90 seconds. Readiness reports unavailable until it does.";
         if (health.OldestPendingAt is { } oldest && now - oldest > TimeSpan.FromMinutes(5))
             yield return $"Processing backlog: the oldest pending item has waited {(int)(now - oldest).TotalMinutes} minutes.";
-        if (health.OldestExpiredRawAt is { } expired && now - expired > TimeSpan.FromMinutes(5))
+        if (health.RawRetentionLagSeconds > TimeSpan.FromMinutes(5).TotalSeconds)
             yield return $"Raw retention is behind: {Presentation.Count(health.ExpiredRawRows)} expired events are awaiting deletion.";
         if (health.DeadLetters > 0)
             yield return "Some telemetry records were quarantined. Deploy a fix, then run the replay command described in the operations guide.";

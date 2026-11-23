@@ -160,17 +160,28 @@ public sealed class PortalAdminTests
     }
 
     [Test]
-    public async Task ChangeControlExplainsAccessWithoutCallingGovernanceEndpoints()
+    public async Task ChangeControlShowsSupportRolesMaintenanceWithoutCallingGovernanceEndpoints()
     {
-        var api = new StubApi();
+        var starts = DateTimeOffset.UtcNow.AddHours(-1);
+        var api = new StubApi().On(HttpMethod.Get, "/api/v1/admin/maintenance", Json(new[]
+        {
+            new { id = "3f2a1c5e-6b7d-4e8f-9a0b-1c2d3e4f5a6b", application = "payments-gateway", environment = "production",
+                startsAt = starts, endsAt = starts.AddHours(3), reason = "Gateway certificate rotation", createdAt = starts.AddDays(-1),
+                createdBy = "owner-subject-17", changeId = "6b7d1c1e-5c3a-4f07-9d55-1f0e8f0d2a11", cancelledAt = (DateTimeOffset?)null,
+                active = true }
+        }));
         await using var context = CreateContext(api);
 
         var page = context.Render<Administration>(parameters => parameters.AddCascadingValue(
             Operator(administer: false, propose: false, audit: false) with { Role = "ProductionSupport" }));
 
-        Assert.That(page.Markup, Does.Contain("Change control is not available for your role"));
-        Assert.That(page.FindAll("form"), Is.Empty);
-        Assert.That(api.Requests, Is.Empty);
+        page.WaitForAssertion(() => Assert.That(page.Markup, Does.Contain("Gateway certificate rotation")), Wait);
+        Assert.Multiple(() =>
+        {
+            Assert.That(page.Markup, Does.Contain("Change control is not available for your role"));
+            Assert.That(page.FindAll("form"), Is.Empty, "Support roles read maintenance windows but cannot propose.");
+            Assert.That(api.Requests.Select(request => request.Target), Is.EqualTo(new[] { "/api/v1/admin/maintenance?includeEnded=false" }));
+        });
     }
 
     [TestCase("0")]
@@ -189,6 +200,24 @@ public sealed class PortalAdminTests
 
         Assert.That(page.Find("form.proposal-form [role=alert]").TextContent,
             Is.EqualTo("Latency monitors require a supported percentile and a threshold between 1 ms and 24 hours."));
+        Assert.That(api.Requests.Where(request => request.Method == HttpMethod.Post), Is.Empty);
+    }
+
+    [TestCase("ok", "Enter a reason of at least 3 characters.")]
+    [TestCase("Checkout latency budget.\nAgreed with the owner.", "Write the reason on one line, without line breaks or tabs.")]
+    public async Task ProposalFormBlocksReasonsTheServerWouldRejectWithoutCallingTheApi(string reason, string message)
+    {
+        var api = ChangeControlApi();
+        await using var context = CreateContext(api);
+        var page = context.Render<Administration>(parameters => parameters.AddCascadingValue(Operator()));
+        page.WaitForElement("#monitor-threshold", Wait);
+
+        page.Find("#monitor-name").Change("checkout-p95");
+        page.Find("#monitor-threshold").Change("1200");
+        page.Find("#monitor-reason").Input(reason);
+        page.Find("form.proposal-form").Submit();
+
+        Assert.That(page.Find("form.proposal-form [role=alert]").TextContent, Is.EqualTo(message));
         Assert.That(api.Requests.Where(request => request.Method == HttpMethod.Post), Is.Empty);
     }
 

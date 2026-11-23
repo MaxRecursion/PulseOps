@@ -93,20 +93,20 @@ public sealed partial class Storage
     // ---- Maintenance ----
 
     /// <summary>The active, uncancelled maintenance window covering the scope at <paramref name="at"/>, if any.</summary>
-    private (string Id, string Reason)? ActiveMaintenance(SqliteConnection connection, SqliteTransaction transaction,
+    private (string Id, string Reason, long Ends)? ActiveMaintenance(SqliteConnection connection, SqliteTransaction transaction,
         string application, string environment, long at)
     {
         using var command = connection.Command(transaction, """
-            SELECT id, reason FROM maintenance_windows
+            SELECT id, reason, ends FROM maintenance_windows
             WHERE application = $app AND environment = $env AND ends > $at AND starts <= $at AND cancelled IS NULL
             ORDER BY ends DESC, id LIMIT 1
             """, ("$app", application), ("$env", environment), ("$at", at));
         using var row = command.ExecuteReader();
-        return row.Read() ? (row.GetString(0), row.GetString(1)) : null;
+        return row.Read() ? (row.GetString(0), row.GetString(1), row.GetInt64(2)) : null;
     }
 
     /// <summary>Read-only form of the suppression lookup: the window covering the scope at the instant, if any.</summary>
-    internal (string Id, string Reason)? ActiveMaintenance(string application, string environment, DateTimeOffset at)
+    internal (string Id, string Reason, long Ends)? ActiveMaintenance(string application, string environment, DateTimeOffset at)
     {
         using var connection = Open();
         using var snapshot = connection.BeginTransaction(deferred: true);
@@ -207,7 +207,9 @@ public sealed partial class Storage
                 AuditDetail(new
                 {
                     entity = draft.Entity, operation = draft.Operation, target = draft.Target,
-                    payloadSha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(draft.Payload))), reason
+                    // The free-text reason stays in config_changes only. The chain is immutable, so text that may later need
+                    // redaction must never enter it; the change id links the entry to the reason.
+                    payloadSha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(draft.Payload)))
                 }));
             return new ChangeOutcome(201, Id: id);
         });
@@ -260,8 +262,9 @@ public sealed partial class Storage
                 {
                     if (change.BaseRevision is null)
                     {
+                        // Configuration and approved policies share one evaluation budget of 300 monitors.
                         using var count = connection.Command(transaction, "SELECT COUNT(*) FROM monitor_policies");
-                        if ((long)count.ExecuteScalar()! >= MaximumManagedMonitors)
+                        if ((long)count.ExecuteScalar()! + options.Monitors.Count >= MaximumManagedMonitors)
                             return ChangeOutcome.Conflict("managed_monitor_limit");
                     }
                     long revision = (change.BaseRevision ?? 0) + 1;
@@ -629,14 +632,20 @@ public sealed partial class Storage
         return Convert.ToHexStringLower(SHA256.HashData(buffer.WrittenSpan));
     }
 
-    /// <summary>Recomputes every entry in ascending sequence, streaming, and reports the first entry that does not verify.</summary>
-    internal static AuditChain VerifyAuditChain(SqliteConnection connection, SqliteTransaction? transaction = null)
+    /// <summary>
+    /// Recomputes entries in ascending sequence, streaming, and reports the first entry that does not verify. With a
+    /// verified prefix (<paramref name="afterEntries"/> entries ending in <paramref name="afterHead"/>) only the entries
+    /// appended since are recomputed.
+    /// </summary>
+    internal static AuditChain VerifyAuditChain(SqliteConnection connection, SqliteTransaction? transaction = null,
+        long afterEntries = 0, string? afterHead = null)
     {
-        using var command = connection.Command(transaction, $"SELECT {AuditColumns} FROM audit_log ORDER BY seq");
+        using var command = connection.Command(transaction, $"SELECT {AuditColumns} FROM audit_log WHERE seq > $after ORDER BY seq",
+            ("$after", afterEntries));
         using var rows = command.ExecuteReader();
-        long entries = 0;
+        long entries = afterEntries;
         long? broken = null;
-        string head = AuditGenesis;
+        string head = afterHead ?? AuditGenesis;
         while (rows.Read())
         {
             entries++;
@@ -651,7 +660,40 @@ public sealed partial class Storage
         return new(broken is null, entries, head, broken);
     }
 
-    /// <summary>Newest entries first, with the chain summary computed over the full log in the same snapshot.</summary>
+    // Page views verify only entries appended after the last verified head: rows are append-only (UPDATE and DELETE
+    // triggers), and the last verified row's hash is re-read on every view. The whole chain is recomputed at least every
+    // ten minutes, so an out-of-band edit, which needs the triggers dropped, is reported within that interval.
+    // Exports always verify the full chain.
+    private const long AuditFullVerificationMs = 10 * 60_000;
+    private readonly Lock _auditVerification = new();
+    private (long Entries, string Head, long VerifiedAt)? _auditVerified;
+
+    private AuditChain VerifiedAuditChain(SqliteConnection connection, SqliteTransaction snapshot)
+    {
+        long now = System.Environment.TickCount64;
+        (long Entries, string Head, long VerifiedAt)? known;
+        lock (_auditVerification)
+            known = _auditVerified;
+        bool incremental = false;
+        if (known is { } prefix && now - prefix.VerifiedAt < AuditFullVerificationMs && prefix.Entries > 0)
+        {
+            // The anchor is recomputed from its content, so an edit to the last verified entry forces a full verification.
+            using var anchor = connection.Command(snapshot, $"SELECT {AuditColumns} FROM audit_log WHERE seq = $seq",
+                ("$seq", prefix.Entries));
+            using var row = anchor.ExecuteReader();
+            incremental = row.Read() && row.GetString(9) == prefix.Head && AuditHash(row.GetInt64(0), row.GetInt64(1),
+                row.GetString(2), row.GetString(3), row.GetString(4), row.GetString(5), row.GetString(6), row.GetString(7),
+                row.GetString(8)) == prefix.Head;
+        }
+        var chain = incremental
+            ? VerifyAuditChain(connection, snapshot, known!.Value.Entries, known.Value.Head)
+            : VerifyAuditChain(connection, snapshot);
+        lock (_auditVerification)
+            _auditVerified = chain.Verified ? (chain.Entries, chain.HeadHash, incremental ? known!.Value.VerifiedAt : now) : null;
+        return chain;
+    }
+
+    /// <summary>Newest entries first, with the chain summary for the full log in the same snapshot.</summary>
     internal AuditPage? AuditLog(AdminCaller caller, string? action, int limit, int offset)
     {
         if (!caller.CanAudit)
@@ -659,7 +701,7 @@ public sealed partial class Storage
         var scopes = caller.Readable;
         using var connection = Open();
         using var snapshot = connection.BeginTransaction(deferred: true);
-        var chain = VerifyAuditChain(connection, snapshot);
+        var chain = VerifiedAuditChain(connection, snapshot);
         using var command = connection.Command(snapshot, $"""
             SELECT {AuditColumns} FROM audit_log
             WHERE {AdminScopeClause(scopes)} AND {(action is null ? "1" : "action = $action")}

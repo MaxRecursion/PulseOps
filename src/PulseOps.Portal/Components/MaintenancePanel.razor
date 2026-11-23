@@ -64,7 +64,7 @@
                 </div>
                 <div class="field">
                     <label for="maintenance-reason">Reason for the reviewer</label>
-                    <textarea id="maintenance-reason" maxlength="500" rows="2" required placeholder="Planned release, database patching…"
+                    <textarea id="maintenance-reason" maxlength="200" rows="2" required placeholder="Planned release, database patching…"
                               @bind="_reason" @bind:event="oninput"></textarea>
                 </div>
                 @if (_createError is not null)
@@ -152,7 +152,7 @@
         var ends = MaintenanceRules.ParseUtc(_ends);
         _createError = parts.Length != 2 || !Context.Scopes.Any(scope => scope.Application == parts[0] && scope.Environment == parts[1])
             ? "Choose an application environment."
-            : MaintenanceRules.Validate(starts, ends, DateTimeOffset.UtcNow) ?? MonitorRules.ReasonProblem(_reason);
+            : MaintenanceRules.Validate(starts, ends, DateTimeOffset.UtcNow) ?? MonitorRules.ReasonProblem(_reason, 200);
         if (_createError is not null || starts is not { } from || ends is not { } until)
             return;
 

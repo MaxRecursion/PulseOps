@@ -167,7 +167,11 @@ app.Use(async (ctx, next) =>
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
         "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
     if (ctx.Request.Path.StartsWithSegments("/api") || ctx.Request.Path.StartsWithSegments("/auth"))
-        ctx.Response.Headers.CacheControl = "no-store";
+    {
+        // The exact values antiforgery requires, so issuing a CSRF token does not log a header override on every load.
+        ctx.Response.Headers.CacheControl = "no-cache, no-store";
+        ctx.Response.Headers.Pragma = "no-cache";
+    }
     if (!development && !ctx.Request.IsHttps && !ctx.Request.Path.StartsWithSegments("/health"))
     {
         ctx.Response.StatusCode = StatusCodes.Status400BadRequest;

@@ -14,7 +14,9 @@ param(
     [string] $SnapshotPath,
     [switch] $DeferStart,
     [ValidateRange(5, 300)]
-    [int] $HealthWaitSeconds = 60
+    [int] $HealthWaitSeconds = 60,
+    [ValidateRange(10, 86400)]
+    [int] $DatabaseCommandTimeoutSeconds = 1800
 )
 
 Set-StrictMode -Version Latest
@@ -202,7 +204,8 @@ function Add-StagedRelease {
 function Invoke-HostCommand {
     param([string] $Executable, [string[]] $Command)
 
-    Invoke-PulseProcess -FilePath $Executable -Arguments (@('--config', $configPath) + $Command) -ProductionHost
+    Invoke-PulseProcess -FilePath $Executable -Arguments (@('--config', $configPath) + $Command) -ProductionHost `
+        -TimeoutSeconds $DatabaseCommandTimeoutSeconds
 }
 
 function Set-PulseService {
@@ -221,6 +224,17 @@ function Set-PulseService {
     }
     Invoke-PulseProcess $sc @('failure', $Name, 'reset=', '86400', 'actions=', 'restart/5000/restart/30000/restart/120000')
     Invoke-PulseProcess $sc @('failureflag', $Name, '1')
+}
+
+function Register-PulseServices {
+    param([string] $Executable, [bool] $Detached)
+
+    if ($Detached) {
+        Set-PulseService $workerName $Executable -Worker
+    } elseif (Get-ServiceRelease $workerName) {
+        Invoke-PulseProcess $sc @('config', $workerName, 'start=', 'disabled')
+    }
+    Set-PulseService $serverName $Executable
 }
 
 function Grant-PulseServiceAccess {
@@ -276,32 +290,30 @@ function Backup-Database {
         Invoke-HostCommand $Executable @('--verify-backup', $staging)
         [IO.File]::Move($staging, $Destination)
     } finally {
-        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Force }
+        foreach ($suffix in '', '-wal', '-shm', '-journal') {
+            $partial = "$staging$suffix"
+            if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force -ErrorAction Continue }
+        }
     }
     Write-Host "Verified SQLite backup at $Destination"
 }
 
 function Backup-LiveDatabase {
-    param([string] $Executable, [string] $Prefix)
+    param([string] $PreferredVersion, [string] $Prefix)
 
     $destination = Get-SnapshotPath $Prefix
-    try {
-        Backup-Database $Executable $destination
-        return
-    } catch {
-        Write-Warning 'The preferred release could not back up the live database. Checking other trusted staged releases.'
-    }
-
-    $alternatives = Get-ChildItem -LiteralPath $releases -Directory | Sort-Object LastWriteTimeUtc -Descending
-    foreach ($candidate in $alternatives) {
-        if ($candidate.Name -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') { continue }
+    $alternatives = @(Get-ChildItem -LiteralPath $releases -Directory | Sort-Object LastWriteTimeUtc -Descending)
+    $candidates = @($PreferredVersion) + @($alternatives | ForEach-Object Name)
+    foreach ($candidate in $candidates | Select-Object -Unique) {
+        if ($candidate -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') { continue }
         try {
-            $alternative = Get-ReleaseExecutable $candidate.Name
-            if ($alternative -eq $Executable) { continue }
-            Backup-Database $alternative $destination
+            $executable = Get-ReleaseExecutable $candidate
+            Backup-Database $executable $destination
             return
+        } catch [TimeoutException] {
+            throw
         } catch {
-            Write-Warning "Staged release '$($candidate.Name)' could not create a verified backup."
+            Write-Warning "Staged release '$candidate' could not create a verified backup."
         }
     }
     throw 'No staged release could create a verified pre-change snapshot. The live database was preserved.'
@@ -329,13 +341,14 @@ if ($Action -eq 'Initialize') {
 }
 
 if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { throw 'Initialize the PulseOps installation first.' }
-if ($Action -in @('Deploy', 'Rollback', 'Start') -and (Test-Path -LiteralPath $iisMarker)) {
-    throw 'This installation uses IIS. Follow the IIS release procedure.'
-}
 if (-not $PSCmdlet.ShouldProcess($installRoot, $Action)) { return }
 
 $lock = [IO.File]::Open((Join-Path $installRoot '.operations.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
 try {
+    $iis = Test-Path -LiteralPath $iisMarker
+    if ($iis -and $Action -in @('Deploy', 'Rollback', 'Start')) {
+        throw 'This installation uses IIS. Follow the IIS release procedure.'
+    }
     if ($Action -eq 'Stop') { Stop-PulseServices; return }
     if ($Action -eq 'Remove') {
         Stop-PulseServices
@@ -368,6 +381,7 @@ try {
     $target = if ($Version) { $Version } else { $current }
     if (-not $target) { throw 'No active service release. Specify a staged -Version.' }
     $exe = Get-ReleaseExecutable $target
+    $backupVersion = if ($current) { $current } else { $target }
 
     $snapshot = if ($SnapshotPath) { [IO.Path]::GetFullPath($SnapshotPath) }
     switch ($Action) {
@@ -385,14 +399,11 @@ try {
             Assert-PulseServicesStopped
             Invoke-HostCommand $exe @('--verify-backup', $snapshot)
             Disable-PulseServices
-            if (Test-Path -LiteralPath $db) { Backup-LiveDatabase $exe 'before-restore' }
-            Invoke-HostCommand $exe @('--restore', $snapshot)
-            if ($detached) {
-                Set-PulseService $workerName $exe -Worker
-            } elseif (Get-ServiceRelease $workerName) {
-                Invoke-PulseProcess $sc @('config', $workerName, 'start=', 'disabled')
+            if (Test-Path -LiteralPath $db) {
+                Backup-LiveDatabase $backupVersion 'before-restore'
             }
-            Set-PulseService $serverName $exe
+            Invoke-HostCommand $exe @('--restore', $snapshot)
+            if (-not $iis) { Register-PulseServices $exe $detached }
         }
         { $_ -in @('Deploy', 'Rollback') } {
             if ($Action -eq 'Rollback' -and $snapshot) { Invoke-HostCommand $exe @('--verify-backup', $snapshot) }
@@ -400,18 +411,12 @@ try {
             Assert-PulseServicesStopped
             Disable-PulseServices
             if (Test-Path -LiteralPath $db) {
-                $backupExe = if ($current) { Get-ReleaseExecutable $current } else { $exe }
-                Backup-LiveDatabase $backupExe 'before-release'
+                Backup-LiveDatabase $backupVersion 'before-release'
             }
             if ($Action -eq 'Rollback' -and $snapshot) { Invoke-HostCommand $exe @('--restore', $snapshot) }
             Invoke-HostCommand $exe @('--migrate')
 
-            if ($detached) {
-                Set-PulseService $workerName $exe -Worker
-            } elseif (Get-ServiceRelease $workerName) {
-                Invoke-PulseProcess $sc @('config', $workerName, 'start=', 'disabled')
-            }
-            Set-PulseService $serverName $exe
+            Register-PulseServices $exe $detached
             if ($DeferStart) {
                 Write-Host "PulseOps release $target is registered and disabled. Run Start once host prerequisites are complete."
                 return

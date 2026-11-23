@@ -102,6 +102,8 @@ public sealed partial class PortalApi
         (HttpStatusCode.BadRequest, "invalid_change") => Clip(detail) is { Length: > 0 } reason ? reason : "PulseOps rejected the proposed values.",
         (HttpStatusCode.BadRequest, "range_exceeds_hourly_retention") =>
             "Hourly rollups are not kept for the selected range. Choose a shorter range or daily resolution.",
+        (HttpStatusCode.BadRequest, "range_too_large") =>
+            "This selection holds too many rollup rows. Choose a shorter range, one event type or an alias.",
         (HttpStatusCode.BadRequest, "invalid_history_query") =>
             "PulseOps could not apply these history filters. Check the event type, alias, version and range.",
         (HttpStatusCode.BadRequest, _) => "PulseOps could not accept the request. Reload the page and try again.",

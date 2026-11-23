@@ -383,7 +383,7 @@ sealed class Soak(SoakSettings settings, HttpClient http, TargetScope[] scopes, 
         bool aborted = false;
         try
         {
-            await Generate(seconds, load.Token);
+            await Generate(seconds, load.Token, cancellation);
         }
         catch (OperationCanceledException) when (load.IsCancellationRequested)
         {
@@ -422,7 +422,9 @@ sealed class Soak(SoakSettings settings, HttpClient http, TargetScope[] scopes, 
     }
 
     // Open-loop pacing: events are due at the configured rate whether or not earlier requests have completed.
-    private async Task Generate(double seconds, CancellationToken cancellation)
+    // Load pacing stops with `cancellation`; each dispatched batch runs on `sends`, which ends only when the operator
+    // aborts, so batches in flight when the load ends still complete and are counted.
+    private async Task Generate(double seconds, CancellationToken cancellation, CancellationToken sends)
     {
         long dispatched = 0;
         int sequence = 0;
@@ -442,7 +444,7 @@ sealed class Soak(SoakSettings settings, HttpClient http, TargetScope[] scopes, 
                     await _inflight.WaitAsync(cancellation);
                 }
                 dispatched += count;
-                _ = Send(sequence++, count, phase, cancellation);
+                _ = Send(sequence++, count, phase, sends);
             }
             if (final)
                 return;
@@ -475,7 +477,9 @@ sealed class Soak(SoakSettings settings, HttpClient http, TargetScope[] scopes, 
             var events = new object[count];
             for (int i = 0; i < count; i++)
             {
-                bool failed = index == 0 ? i % 3 == 0 : (sequence + i) % 7 == 0;
+                // Failures exercise incident detection only on the disposable local host. Remote soaks send successes, so a
+                // staging scope never opens incidents or notifies real receivers because of load testing.
+                bool failed = operatorApi && (index == 0 ? i % 3 == 0 : (sequence + i) % 7 == 0);
                 events[i] = new
                 {
                     id = Guid.NewGuid(), occurredAt = occurred, version = "1.0.0-soak",

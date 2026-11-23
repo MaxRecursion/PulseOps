@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Mail;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -8,6 +9,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -99,10 +101,11 @@ public sealed partial class NotificationTests
     [TestCase("421 4.3.2 Service not available", null, null, null, "pending", 421)]
     [TestCase(null, "451 4.3.0 Try again later", "451 4.3.0 Try again later", null, "pending", 451)]
     [TestCase(null, "450 4.2.1 Mailbox busy", "550 5.1.1 No such user", null, "pending", 450)]
-    [TestCase(null, null, "452 4.2.2 Mailbox full", null, "pending", 452)]
+    // One recipient accepted and one refused: the message already reached the accepted recipient, so it is not resent.
+    [TestCase(null, null, "452 4.2.2 Mailbox full", null, "delivered", 452)]
     [TestCase(null, null, null, "451 4.3.0 Local error in processing", "pending", 451)]
     [TestCase(null, "550 5.1.1 No such user", "553 5.1.3 Mailbox name not allowed", null, "failed", 550)]
-    [TestCase(null, null, "550 5.1.1 No such user", null, "failed", 550)]
+    [TestCase(null, null, "550 5.1.1 No such user", null, "delivered", 550)]
     [TestCase(null, null, null, "554 5.6.0 Transaction failed", "failed", 554)]
     public async Task SmtpRepliesDecideBetweenRetryAndFailure(string? greeting, string? onCallReply, string? leadReply,
         string? dataReply, string expected, int status)
@@ -127,6 +130,8 @@ public sealed partial class NotificationTests
             Assert.That(logs, Does.Contain(delivery.Id).And.Contain("SMTP status " + status));
             Assert.That(logs, Does.Not.Contain("example.test"), "Recipients and server replies are never logged.");
         });
+        if (expected == "delivered")
+            Assert.That(_smtp.Messages.Single().Recipients, Is.EqualTo(new[] { OnCall[0] }), "Only the accepted recipient received it, once.");
         if (expected == "pending")
         {
             Assert.That(delivery.NextAttempt, Is.InRange(Now.AddSeconds(11), Now.AddSeconds(15)), "The first retry follows the backoff.");
@@ -185,6 +190,78 @@ public sealed partial class NotificationTests
         _clock.Now = delivery.NextAttempt;
         Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.True);
         Assert.That((Delivery("finance-oncall").State, Delivery("finance-oncall").Attempts), Is.EqualTo(("delivered", 8L)));
+    }
+
+    [TestCase(HttpStatusCode.RequestTimeout, 0, 0)]
+    [TestCase(HttpStatusCode.ServiceUnavailable, 120, 120)]
+    [TestCase(HttpStatusCode.TooManyRequests, 7200, 3600)]
+    public async Task WebhookRetriesWithBoundedGuidanceAndAStableDeliveryId(HttpStatusCode status, int guidance, int expectedDelay)
+    {
+        _options.EmailRoutes = [];
+        _options.Webhooks = [new() { Name = "pager", Url = "https://hooks.example.test/pulseops" }];
+        _webhooks.Respond = () => new HttpResponseMessage(status)
+        {
+            Headers = { RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(guidance)) }
+        };
+        OpenIncident();
+        var worker = Worker();
+
+        Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.True);
+        var deferred = Delivery("pager");
+        Assert.That((deferred.State, deferred.Attempts, deferred.LeaseId), Is.EqualTo(("pending", 1L, (string?)null)));
+        if (expectedDelay == 0)
+            Assert.That(deferred.NextAttempt, Is.InRange(Now.AddSeconds(11), Now.AddSeconds(15)));
+        else
+            Assert.That(deferred.NextAttempt, Is.EqualTo(Now.AddSeconds(expectedDelay)));
+        Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.False);
+
+        _webhooks.Respond = () => new HttpResponseMessage(HttpStatusCode.Accepted);
+        _clock.Now = deferred.NextAttempt;
+        Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.True);
+        var delivered = Delivery("pager");
+        Assert.Multiple(() =>
+        {
+            Assert.That((delivered.State, delivered.Attempts), Is.EqualTo(("delivered", 2L)));
+            Assert.That(_webhooks.Requests.Select(r => r.IdempotencyKey), Is.EqualTo(new[] { deferred.Id, deferred.Id }));
+            Assert.That(_logger.Lines.Single(), Does.Contain("pager").And.Contain($"HTTP status {(int)status}"));
+        });
+    }
+
+    [Test]
+    public async Task PermanentWebhookRejectionIsVisibleAndNotRetried()
+    {
+        _options.EmailRoutes = [];
+        _options.Webhooks = [new() { Name = "pager", Url = "https://hooks.example.test/pulseops" }];
+        _webhooks.Respond = () => new HttpResponseMessage(HttpStatusCode.BadRequest);
+        OpenIncident();
+        var worker = Worker();
+
+        Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.True);
+        var failed = Delivery("pager");
+        Assert.Multiple(() =>
+        {
+            Assert.That((failed.State, failed.Attempts, failed.LeaseId), Is.EqualTo(("failed", 1L, (string?)null)));
+            Assert.That(failed.NextAttempt, Is.EqualTo(Now));
+            Assert.That(_logger.Lines.Single(), Does.Contain("failed").And.Contain("HTTP status 400"));
+        });
+        _clock.Now = Now.AddDays(1);
+        Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.False);
+    }
+
+    [Test]
+    public async Task UnexpectedWebhookFailureIsConfinedToTheDelivery()
+    {
+        _options.EmailRoutes = [];
+        _options.Webhooks = [new() { Name = "pager", Url = "https://hooks.example.test/pulseops" }];
+        _webhooks.Respond = () => throw new InvalidOperationException("Receiver error details");
+        OpenIncident();
+
+        Assert.That(await Worker().DeliverOnceAsync(_http, CancellationToken.None), Is.True);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Delivery("pager").State, Is.EqualTo("failed"));
+            Assert.That(_logger.Lines.Single(), Does.Contain(nameof(InvalidOperationException)).And.Not.Contain("Receiver error details"));
+        });
     }
 
     [Test]
@@ -356,6 +433,36 @@ public sealed partial class NotificationTests
     }
 
     [Test]
+    public async Task TransitionsForOneIncidentLeaveInOrderAfterRetries()
+    {
+        _options.EmailRoutes = [];
+        _options.Webhooks = [new() { Name = "pager", Url = "https://hooks.example.test/pulseops" }];
+        var incident = OpenIncident();
+        var worker = Worker();
+        _webhooks.Respond = () => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+        Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.True, "The Open fails and backs off.");
+
+        Assert.That(_storage.ChangeIncident(QueryFilter.From(new Microsoft.AspNetCore.Http.DefaultHttpContext().Request, [_production], Now),
+            incident.Id, new("Resolved", null, null), "operator-1", Now), Is.EqualTo(204));
+        Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.False,
+            "The Resolved waits while the older Open is still pending.");
+
+        _webhooks.Respond = () => new HttpResponseMessage(HttpStatusCode.Accepted);
+        _clock.Now = Now.AddHours(1);
+        Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.True);
+        Assert.That(await worker.DeliverOnceAsync(_http, CancellationToken.None), Is.True);
+        var bodies = _webhooks.Requests.Select(request => JsonDocument.Parse(request.Body).RootElement).ToArray();
+        var delivered = bodies.Skip(1).Select(body => (Status: body.GetProperty("status").GetString(),
+            Sequence: body.GetProperty("sequence").GetInt64(), Changed: body.GetProperty("changedAt").GetDateTimeOffset())).ToArray();
+        Assert.Multiple(() =>
+        {
+            Assert.That(delivered.Select(item => item.Status), Is.EqualTo(new[] { "Open", "Resolved" }));
+            Assert.That(delivered[1].Sequence, Is.GreaterThan(delivered[0].Sequence));
+            Assert.That(delivered[0].Changed, Is.EqualTo(Now));
+        });
+    }
+
+    [Test]
     public async Task TlsRequiredRelayWithoutStartTlsNeverReceivesTheEnvelope()
     {
         _options.Smtp.UseTls = true;
@@ -484,12 +591,13 @@ public sealed partial class NotificationTests
     private sealed class RecordingHandler : HttpMessageHandler
     {
         public ConcurrentQueue<(string? IdempotencyKey, string Body)> Requests { get; } = new();
+        public Func<HttpResponseMessage> Respond { get; set; } = () => new HttpResponseMessage(HttpStatusCode.Accepted);
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             Requests.Enqueue((request.Headers.TryGetValues("Idempotency-Key", out var keys) ? keys.Single() : null,
                 request.Content is null ? "" : await request.Content.ReadAsStringAsync(token)));
-            return new HttpResponseMessage(HttpStatusCode.Accepted);
+            return Respond();
         }
     }
 
