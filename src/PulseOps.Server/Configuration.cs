@@ -10,6 +10,7 @@ public sealed class PlatformOptions
     public string DataProtectionPath { get; set; } = "";
     public bool EmbeddedWorker { get; set; } = true;
     public bool Demo { get; set; }
+    public string DemoBrowserOrigin { get; set; } = "http://localhost:5091";
     public int RetentionDays { get; set; } = 14;
     private int? _errorRetentionDays;
     /// <summary>Defaults to 30 days, bounded by the configured raw and incident retention windows.</summary>
@@ -67,7 +68,9 @@ public sealed class PlatformOptions
 
         if (Demo && !databaseOnly)
         {
-            Scopes.AddRange(DemoData.Scopes());
+            if (!Validation.IsOrigin(DemoBrowserOrigin, development) || !new Uri(DemoBrowserOrigin).IsLoopback)
+                throw new InvalidOperationException("DemoBrowserOrigin must be an exact loopback origin.");
+            Scopes.AddRange(DemoData.Scopes(DemoBrowserOrigin));
             Rules.Add(new() { Application = "finance-demo", Environment = "demo", Kind = "api", MinimumSamples = 1, MinimumFailures = 1 });
             Monitors.AddRange(DemoData.Monitors());
             // A single local demo operator must be able to complete the maker-checker workflow. Development only.

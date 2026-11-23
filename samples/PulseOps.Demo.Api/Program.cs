@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Http.Features;
 const long maxRelayBytes = 192 * 1024;
 const string defaultServer = "http://localhost:5080";
 const string defaultOrigin = "http://localhost:5091";
+const string demoScope = "application=finance-demo&environment=demo&hours=1";
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
 if (!builder.Environment.IsDevelopment())
@@ -53,7 +54,19 @@ app.MapGet("/pulseops/demo-config.js", () =>
     var endpoint = System.Text.Json.JsonSerializer.Serialize(new Uri(upstream, "/api/telemetry/v1/startup").AbsoluteUri);
     return Results.Text($"document.getElementById('pulseops-bootstrap').dataset.startupEndpoint = {endpoint};", "application/javascript");
 });
-app.MapGet("/pulseops/portal", () => Results.Redirect(upstream.AbsoluteUri));
+var portal = app.MapGroup("/pulseops/portal");
+portal.MapGet("", () => OpenPortal("/"));
+portal.MapGet("/{view}", (string view) => view switch
+{
+    "events" => OpenPortal("/logs"),
+    "incidents" => OpenPortal("/incidents"),
+    "history" => OpenPortal("/history", "&days=7&kind=operation&name=generate-report"),
+    _ => Results.NotFound()
+});
+portal.MapGet("/trace/{traceId}", (string traceId) =>
+    traceId.Length == 32 && traceId.All(c => char.IsAsciiDigit(c) || c is >= 'a' and <= 'f') && traceId.Any(c => c != '0')
+        ? OpenPortal("/traces", "&traceId=" + traceId)
+        : Results.NotFound());
 app.MapGet("/api/health", () => Results.Ok(new { status = "healthy", simulation = true }));
 app.MapGet("/api/report", async Task<IResult> (string? scenario, CancellationToken cancellationToken) =>
 {
@@ -133,6 +146,9 @@ app.MapPost("/pulseops/telemetry", async Task<IResult> (
 
 app.MapFallbackToFile("index.html");
 await app.RunAsync();
+
+IResult OpenPortal(string path, string filter = "") =>
+    Results.Redirect(new Uri(upstream, $"{path}?{demoScope}{filter}").AbsoluteUri);
 
 static Uri RequireLoopbackOrigin(string configured)
 {

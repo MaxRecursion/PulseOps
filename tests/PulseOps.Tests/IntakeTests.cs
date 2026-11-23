@@ -41,6 +41,31 @@ public sealed class IntakeTests
     }
 
     [Test]
+    public void DemoStartupAcceptsOnlyTheConfiguredLoopbackOrigin()
+    {
+        var options = new PlatformOptions { Demo = true, DemoBrowserOrigin = "http://localhost:5281" };
+        options.Validate(true, _directory, false);
+        var batch = new TelemetryBatch(1, "finance-demo", "demo",
+            [Event("startup") with { Name = "PageLoaded" }]);
+        var context = new DefaultHttpContext();
+        context.Request.Headers.Origin = "http://localhost:5091";
+        Assert.That(Endpoints.Receive(batch, context, options, _storage, new FixedClock(Now), true),
+            Is.InstanceOf<IStatusCodeHttpResult>().With.Property("StatusCode").EqualTo(StatusCodes.Status403Forbidden));
+
+        context.Request.Headers.Origin = options.DemoBrowserOrigin;
+        Assert.That(Endpoints.Receive(batch, context, options, _storage, new FixedClock(Now), true),
+            Is.InstanceOf<IStatusCodeHttpResult>().With.Property("StatusCode").EqualTo(StatusCodes.Status202Accepted));
+    }
+
+    [TestCase("https://demo.example.test")]
+    [TestCase("http://localhost:5281/path")]
+    public void DemoStartupRejectsOriginsOutsideTheLoopbackOriginContract(string origin)
+    {
+        var options = new PlatformOptions { Demo = true, DemoBrowserOrigin = origin };
+        Assert.Throws<InvalidOperationException>(() => options.Validate(true, _directory, false));
+    }
+
+    [Test]
     public void ExceptionEventsOutliveOtherRawTelemetry()
     {
         _storage.Ingest(_scope, [Event("api"), Event("error")], false, Now);

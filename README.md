@@ -8,24 +8,21 @@ Repository: <https://github.com/MaxRecursion/PulseOps>
 
 ## Quick start
 
-From the repository root on macOS or Linux, start a labeled local demo with .NET 10 and a fresh SQLite database.
+From the repository root, use PowerShell 7.4 or later and the pinned .NET 10 SDK to start both local demo hosts with a fresh SQLite database.
 
-```sh
-dotnet restore PulseOps.sln --locked-mode
-dotnet build PulseOps.sln -c Release --no-restore
-demo_dir=$(mktemp -d)
-ASPNETCORE_ENVIRONMENT=Development PulseOps__Demo=true PulseOps__DatabasePath="$demo_dir/pulseops.db" \
-  dotnet run --project src/PulseOps.Server -c Release --no-build --no-launch-profile -- --urls http://localhost:5080
+```powershell
+pwsh -File ./deployment/demo/Run-Demo.ps1
 ```
 
-Open the [dashboard](http://localhost:5080/) once [readiness](http://localhost:5080/health/ready) returns `{"status":"ready"}`. SQLite is included. The dashboard can be explored immediately. To generate an incident, start the sample in a second terminal, open the [finance workspace](http://localhost:5091/) and run the **HTTP 503** scenario.
+Open the finance workspace URL printed by the launcher. Select **Run successful report** or **Trigger HTTP 503**, then select **View this run in PulseOps** to open its trace. The app also links to the demo scope's recent events and incidents. Stop the launcher with Ctrl+C when the demo is over.
 
-```sh
-ASPNETCORE_ENVIRONMENT=Development \
-  dotnet run --project samples/PulseOps.Demo.Api -c Release --no-build --no-launch-profile -- --urls http://localhost:5091
+If the default ports are in use, choose two free loopback ports. Pass `-DotnetPath` if the pinned SDK is outside `PATH`.
+
+```powershell
+pwsh -File ./deployment/demo/Run-Demo.ps1 -CollectorPort 5280 -AppPort 5281
 ```
 
-Use the [PowerShell and step-by-step setup](#step-by-step-local-setup) on Windows. The [operator handbook](docs/PulseOps-Operator-Guide.docx) covers first use, production installation, monitoring and recovery. The [Windows runbook](docs/Operations.md) contains the protected configuration and deployment commands.
+The [step-by-step setup](#step-by-step-local-setup) runs the hosts independently. The [production handbook](output/pdf/PulseOps-Production-Handbook.pdf) covers SDK integration, scoped reporting, and operating PulseOps on Windows.
 
 ## Feature overview
 
@@ -229,21 +226,18 @@ $env:ASPNETCORE_ENVIRONMENT = 'Development'
 dotnet run --project samples/PulseOps.Demo.Api --no-build --no-launch-profile -- --urls http://localhost:5091
 ```
 
-The demo API serves the Blazor application and authenticated loopback relay.
+The demo API serves the Blazor application and its loopback-only relay. Production apps supply their own authenticated relay.
 
 Open <http://localhost:5091/>.
 
 ## Run the local demo workflow
 
-1. Open PulseOps at <http://localhost:5080/>.
-2. Open the finance demo at <http://localhost:5091/>.
-3. Generate a successful report.
-4. Generate an HTTP 503 report.
-5. In PulseOps, select `finance-demo` and the `demo` environment.
-6. Inspect the generated incident and follow it into the session and trace.
-7. Acknowledge, investigate, mitigate or resolve the incident.
-8. Open <http://localhost:5091/boot-failure.html> to verify startup-failure handling. Anonymous startup evidence is restricted and excluded from trusted incident evaluation.
-9. Stop PulseOps and run another report to verify the SDK and relay fail open.
+1. Open the finance demo at <http://localhost:5091/> or use the app URL printed by the launcher.
+2. Select **Run successful report**. Open **View this run in PulseOps** to see the `generate-report` operation and its `report-api` request in the same trace. Refresh the trace after a moment if the batch is still processing.
+3. Use **Simulate slow report** to see how a slow dependency contributes to the operation duration. Select **Trigger HTTP 503** to generate a failed request and open **Incidents** to inspect the failure evidence in `finance-demo / demo`.
+4. Try the buttons under **Browser diagnostics** and use **Recent events** to find the resulting error or startup telemetry. The startup-failure page deliberately fails before WebAssembly loads. Its anonymous startup observations are diagnostic evidence and are excluded from trusted incident rules.
+5. In the incident view, acknowledge, investigate or resolve the incident. Use the same demo scope in **API explorer** and **History** to show aggregate views.
+6. To show fail-open behavior, block only `/pulseops/telemetry` from the app in a test browser, then run another successful report. Unblock the relay before continuing the telemetry walkthrough.
 
 ## Configuration
 

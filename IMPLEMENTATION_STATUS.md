@@ -2,6 +2,7 @@
 
 ## Delivered
 
+- Local Blazor POC with one-click successful, slow, and HTTP 503 reports, per-run trace links, scoped reporting shortcuts, and a PowerShell launcher for both loopback hosts with a fresh SQLite database.
 - .NET 10 modular server, standalone Blazor WASM portal, Razor Class Library SDK, finance demo with mock API, and optional standalone Windows worker mode. Embedded processing is the default.
 - Self-contained SQLite with WAL, an explicit schema migrator, atomic durable acceptance and processing, deduplication, bounded backlog, retention, local disk protection, native backup/restore and heartbeat readiness.
 - Scoped OIDC role/group authorization, antiforgery for operator actions, authenticated machine intake, controlled anonymous startup, allowlists and request/rate bounds.
@@ -11,6 +12,7 @@
 
 ## Verification evidence
 
+- The POC launcher completed locked restore and a Release build with .NET SDK 10.0.404 and no warnings on macOS. All 153 unit/UI tests and four Chromium end-to-end scenarios passed against its disposable SQLite database and alternate loopback ports. Chromium verified the three report actions through relay acceptance, processed API and operation spans, scoped trace links, 503 incident acknowledgement and resolution, browser and startup failures, and fail-open reporting. The demo layout was checked at desktop and mobile widths. The launcher is a local Development workflow. These checks do not exercise a production relay, OIDC, IIS, or Windows Services.
 - On 23 November 2026, locked restore and Debug build succeeded with .NET SDK 10.0.404 and no warnings. All 150 unit/UI tests passed. The four opt-in Playwright Chromium scenarios remain skipped unless PULSEOPS_E2E=1.
 - For the production documentation update on 23 November 2026, locked restore and an isolated Release build succeeded with .NET SDK 10.0.404. All 150 unit/UI tests passed. A separate Chromium check with disposable demo data verified managed relay HTTP 202, the processed operation in the scoped portal, its trace link, a saved filter URL after reload, an API status drill-down, and the operation's History rollup. The production application's authenticated relay, enterprise identity and target Windows environment still require staging acceptance. [Production onboarding and FAQ](docs/Operations.md#onboard-a-monitored-blazor-application) · [Application reporting](docs/Support.md#create-a-custom-report-for-a-blazor-app)
 - The local HTTPS smoke passed all 25 checks with a temporary layout containing the Release server output and built portal assets. Verification included schema migration, intake, backup verification, offline restore validation, and restart deduplication. The Windows and TeamCity scripts passed PowerShell parsing on macOS.

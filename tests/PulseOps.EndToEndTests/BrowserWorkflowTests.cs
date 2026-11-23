@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Playwright;
 using NUnit.Framework;
 using static Microsoft.Playwright.Assertions;
@@ -8,8 +9,10 @@ namespace PulseOps.EndToEndTests;
 [TestFixture, NonParallelizable, Category("Browser")]
 public sealed class BrowserWorkflowTests
 {
-    private const string Scope = "application=finance-demo&environment=demo&hours=1";
-    private readonly Uri _demo = new("http://localhost:5091");
+    private const string DemoApplication = "finance-demo";
+    private const string DemoEnvironment = "demo";
+    private const string Scope = "application=" + DemoApplication + "&environment=" + DemoEnvironment + "&hours=1";
+    private readonly Uri _demo = new(Environment.GetEnvironmentVariable("PULSEOPS_E2E_DEMO") ?? "http://localhost:5091");
     private readonly Uri _collector = new(Environment.GetEnvironmentVariable("PULSEOPS_E2E_COLLECTOR") ?? "http://localhost:5080");
     private IPlaywright? _playwright;
     private IBrowser? _browser;
@@ -21,12 +24,13 @@ public sealed class BrowserWorkflowTests
         if (Environment.GetEnvironmentVariable("PULSEOPS_E2E") != "1")
             Assert.Ignore("Start the two local demo hosts and set PULSEOPS_E2E=1. See docs/SDK.md.");
 
-        Assert.That(_collector.IsLoopback, Is.True, "Browser tests require a disposable local demo collector.");
+        Assert.That(IsLoopbackOrigin(_demo), Is.True, "PULSEOPS_E2E_DEMO must point to a loopback HTTP or HTTPS origin.");
+        Assert.That(IsLoopbackOrigin(_collector), Is.True, "PULSEOPS_E2E_COLLECTOR must point to a disposable loopback HTTP or HTTPS origin.");
         _operatorApi = new HttpClient { BaseAddress = _collector, Timeout = TimeSpan.FromSeconds(5) };
         using var collectorResponse = await _operatorApi.GetAsync("/health/ready");
         using var demoResponse = await _operatorApi.GetAsync(new Uri(_demo, "/api/health"));
         Assert.That(collectorResponse.IsSuccessStatusCode, Is.True, "The local demo collector must be ready.");
-        Assert.That(demoResponse.IsSuccessStatusCode, Is.True, "The sample must be ready on port 5091.");
+        Assert.That(demoResponse.IsSuccessStatusCode, Is.True, "The sample must be ready at the configured demo origin.");
         _playwright = await Playwright.CreateAsync();
         _browser = await _playwright.Chromium.LaunchAsync(new()
         {
@@ -45,13 +49,21 @@ public sealed class BrowserWorkflowTests
     }
 
     [Test]
-    public async Task FailedReportCorrelatesWithASessionAndSupportsIncidentTriage()
+    public async Task QuickReportScenariosLinkToMatchingTracesAndSupportIncidentTriage()
     {
         await using var context = await _browser!.NewContextAsync();
         var page = await context.NewPageAsync();
         await page.GotoAsync(_demo.AbsoluteUri);
         await Expect(page.GetByRole(AriaRole.Heading, new() { Name = "Reporting workspace" })).ToBeVisibleAsync();
         var sessionId = await GetTabSessionId(page);
+
+        var successTrace = await RunReportAsync(page, "Run successful report", sessionId, "success", 200);
+        await Expect(page.GetByText("Completed", new() { Exact = true })).ToBeVisibleAsync();
+        await Expect(page.GetByRole(AriaRole.Cell, new() { Name = "GL-3000" })).ToBeVisibleAsync();
+        await VerifyRunLinkAsync(page, successTrace, "success", 200);
+
+        var slowTrace = await RunReportAsync(page, "Simulate slow report", sessionId, "success", 200, minimumDuration: 2_900);
+        await VerifyRunLinkAsync(page, slowTrace, "success", 200);
 
         var portal = await context.NewPageAsync();
         portal.PageError += (_, error) => TestContext.Error.WriteLine(error);
@@ -64,28 +76,10 @@ public sealed class BrowserWorkflowTests
         await Expect(portal.GetByRole(AriaRole.Heading, new() { Name = "Incident activity" })).ToBeVisibleAsync(new() { Timeout = 30_000 });
 
         var failureStart = DateTimeOffset.UtcNow;
-        await page.GetByLabel("Reporting scenario").SelectOptionAsync("http503");
-        await page.GetByRole(AriaRole.Button, new() { Name = "Run report" }).ClickAsync();
+        var failureTrace = await RunReportAsync(page, "Trigger HTTP 503", sessionId, "failure", 503);
+        Assert.That(failureTrace, Is.Not.EqualTo(successTrace));
         await Expect(page.GetByText("The simulated reporting API returned HTTP 503.")).ToBeVisibleAsync();
-
-        var events = await EventuallyAsync(async () =>
-        {
-            var items = await GetEvents(sessionId);
-            return items.Any(item => item is { Kind: "api", StatusCode: 503 }) &&
-                   items.Any(item => item is { Kind: "operation", Name: "generate-report", Outcome: "failure" })
-                ? items
-                : null;
-        }, "The PulseOps worker never processed the failed browser request and its operation.");
-        var failedRequest = events.Single(item => item is { Kind: "api", StatusCode: 503 });
-        var operation = events.Single(item => item is { Kind: "operation", Name: "generate-report", Outcome: "failure" });
-        Assert.Multiple(() =>
-        {
-            Assert.That(failedRequest.Name, Is.EqualTo("report-api"));
-            Assert.That(failedRequest.SessionId, Is.EqualTo(sessionId));
-            Assert.That(failedRequest.TraceId, Is.Not.Null);
-            Assert.That(failedRequest.TraceId, Is.EqualTo(operation.TraceId));
-            Assert.That(failedRequest.ParentSpanId, Is.EqualTo(operation.SpanId));
-        });
+        await VerifyRunLinkAsync(page, failureTrace, "failure", 503);
 
         var incident = await EventuallyAsync(async () =>
         {
@@ -174,6 +168,81 @@ public sealed class BrowserWorkflowTests
         await Expect(page.GetByRole(AriaRole.Cell, new() { Name = "GL-3000" })).ToBeVisibleAsync();
     }
 
+    private async Task<string> RunReportAsync(IPage page, string button, string sessionId, string outcome, int statusCode,
+        int? minimumDuration = null)
+    {
+        var relay = new Uri(_demo, "/pulseops/telemetry").AbsoluteUri;
+        var runLink = page.GetByRole(AriaRole.Link, new() { Name = "View this run in PulseOps", Exact = true });
+        var priorLink = await runLink.CountAsync() == 0 ? null : await runLink.GetAttributeAsync("href");
+        await page.RunAndWaitForResponseAsync(
+            () => page.GetByRole(AriaRole.Button, new() { Name = button, Exact = true }).ClickAsync(),
+            candidate => candidate.Url == relay && candidate.Request.Method == "POST" && candidate.Status == 202,
+            new() { Timeout = 30_000 });
+        if (priorLink is not null)
+            await Expect(runLink).Not.ToHaveAttributeAsync("href", priorLink);
+        const string tracePrefix = "/pulseops/portal/trace/";
+        await Expect(runLink).ToHaveAttributeAsync("href", new Regex("^" + tracePrefix + "[0-9a-f]{32}$"));
+        var traceId = (await runLink.GetAttributeAsync("href"))![tracePrefix.Length..];
+
+        // Deliberately query every visible scope. A copy in another demo scope must fail the test.
+        var events = await EventuallyAsync(async () =>
+        {
+            var items = await _operatorApi!.GetFromJsonAsync<List<ObservedEvent>>(
+                "/api/v1/events?hours=1&traceId=" + Uri.EscapeDataString(traceId)) ?? [];
+            return items.Any(item => item is { Kind: "api", Name: "report-api" } && item.StatusCode == statusCode) &&
+                   items.Any(item => item is { Kind: "operation", Name: "generate-report" } && item.Outcome == outcome)
+                ? items
+                : null;
+        }, $"The worker did not process the accepted {outcome} report and its API request.");
+
+        var request = events.Single(item => item is { Kind: "api", Name: "report-api" } && item.StatusCode == statusCode);
+        var operation = events.Single(item => item is { Kind: "operation", Name: "generate-report" });
+        Assert.Multiple(() =>
+        {
+            Assert.That(events.Select(item => (item.Application, item.Environment)), Has.All.EqualTo((DemoApplication, DemoEnvironment)));
+            Assert.That(events.Select(item => item.SessionId), Has.All.EqualTo(sessionId));
+            Assert.That(request.Outcome, Is.EqualTo(outcome));
+            Assert.That(request.TraceId, Is.EqualTo(operation.TraceId));
+            Assert.That(operation.TraceId, Is.EqualTo(traceId));
+            Assert.That(operation.SpanId, Is.Not.Null.And.Not.Empty);
+            Assert.That(request.ParentSpanId, Is.EqualTo(operation.SpanId));
+            if (minimumDuration is int duration)
+                Assert.That(request.DurationMs, Is.GreaterThanOrEqualTo(duration));
+        });
+        return traceId;
+    }
+
+    private async Task VerifyRunLinkAsync(IPage page, string traceId, string outcome, int statusCode)
+    {
+        var runLink = page.GetByRole(AriaRole.Link, new() { Name = "View this run in PulseOps", Exact = true });
+        var trace = await page.RunAndWaitForPopupAsync(() => runLink.ClickAsync());
+        await Expect(trace.GetByRole(AriaRole.Heading, new() { Name = "Trace explorer" })).ToBeVisibleAsync(new() { Timeout = 30_000 });
+
+        var destination = new Uri(trace.Url);
+        Assert.Multiple(() =>
+        {
+            Assert.That(destination.GetLeftPart(UriPartial.Authority), Is.EqualTo(_collector.GetLeftPart(UriPartial.Authority)));
+            Assert.That(destination.AbsolutePath, Is.EqualTo("/traces"));
+        });
+        await Expect(trace.GetByRole(AriaRole.Combobox, new() { NameRegex = new Regex("^Application") })).ToHaveValueAsync(DemoApplication);
+        await Expect(trace.GetByRole(AriaRole.Combobox, new() { NameRegex = new Regex("^Environment") })).ToHaveValueAsync(DemoEnvironment);
+        await Expect(trace.GetByLabel("Trace ID", new() { Exact = true })).ToHaveValueAsync(traceId);
+
+        var correlated = trace.Locator("section").Filter(new()
+        {
+            Has = trace.GetByRole(AriaRole.Heading, new() { Name = "Correlated events" })
+        });
+        var request = correlated.GetByRole(AriaRole.Row).Filter(new() { HasText = "report-api" });
+        var operation = correlated.GetByRole(AriaRole.Row).Filter(new() { HasText = "generate-report" });
+        await Expect(request).ToContainTextAsync($"HTTP {statusCode}");
+        await Expect(operation.GetByText(outcome, new() { Exact = true })).ToBeVisibleAsync();
+        await trace.CloseAsync();
+    }
+
+    private static bool IsLoopbackOrigin(Uri uri) =>
+        uri.IsLoopback && uri.Scheme is "http" or "https" &&
+        uri.UserInfo.Length == 0 && uri.PathAndQuery == "/" && uri.Fragment.Length == 0;
+
     private async Task<List<ObservedEvent>> GetEvents(string sessionId) =>
         await _operatorApi!.GetFromJsonAsync<List<ObservedEvent>>("/api/v1/events?" + Scope + "&sessionId=" + sessionId) ?? [];
 
@@ -203,7 +272,7 @@ public sealed class BrowserWorkflowTests
     }
 
     private sealed record ObservedEvent(
-        string SessionId, string Kind, string Name, string Outcome, int? StatusCode,
+        string Application, string Environment, string SessionId, string Kind, string Name, string Outcome, int? StatusCode, double? DurationMs,
         string? TraceId, string? SpanId, string? ParentSpanId, string? Category, bool Anonymous);
 
     private sealed record Incident(string Id, string Name, DateTimeOffset LastSeen);

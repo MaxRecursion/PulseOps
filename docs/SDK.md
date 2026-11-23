@@ -209,7 +209,9 @@ Set `Enabled = false` for the managed client, disable individual capture flags, 
 
 ## Local demo
 
-From the repository root, build both hosts before starting them. Run the collector and sample in separate terminals. The collector database path can point to an unused temporary file for an isolated run.
+Use the [one-command demo launcher](../README.md#quick-start) for a fresh SQLite database and both loopback hosts. The [walkthrough](../README.md#run-the-local-demo-workflow) shows how to trigger success, latency, an HTTP 503, and browser diagnostics, then follow each run to its PulseOps trace or scope.
+
+To run the hosts independently, build both before starting them. You can point the collector at an unused temporary database for an isolated run.
 
 ```powershell
 dotnet build
@@ -226,7 +228,7 @@ dotnet run --project samples/PulseOps.Demo.Api --no-build --no-launch-profile
 
 On Unix shells, pass the same settings as environment variables prefixed to each command. Avoid rebuilding the portal while testing a running development host because the host serves fingerprinted assets from the development build output.
 
-Open `http://localhost:5091/` and select a scenario. The workspace uses generated ledger rows. Launch two independent browser contexts to produce independent sessions. Use `Open a page with a startup failure` to deliberately request a missing framework script. With the collector stopped, a normal report still uses the local mock backend and completes. The sample hosts both the browser and mock API on the same loopback origin. It uses a development relay credential that is valid only with the collector’s explicit demo mode. The sample is unsuitable for deployment with live data or enterprise credentials.
+Open `http://localhost:5091/` and select a scenario. The workspace uses generated ledger rows. Launch two independent browser contexts to produce independent sessions. Use **Open a page with a startup failure** to deliberately request a missing framework script. Block only the telemetry route in a test browser to show that a normal report still completes. The sample hosts both the browser and mock API on the same loopback origin and uses a development relay credential for the collector's explicit demo mode.
 
 ## Browser verification
 
@@ -239,7 +241,7 @@ $env:PULSEOPS_E2E = '1'
 dotnet test tests/PulseOps.EndToEndTests --no-build
 ```
 
-On Unix shells use `PULSEOPS_E2E=1 dotnet test tests/PulseOps.EndToEndTests --no-build`. The run covers a simulated 503, durable processing into a scoped incident, a linked session and parent span, portal acknowledgement and resolution, JavaScript and component rendering errors, anonymous startup reporting with no WASM runtime, and a successful business report with browser telemetry requests blocked. Run against disposable demo data because the test changes incident status. If browser downloads need an allowlisted internal mirror, use your organisation's Playwright distribution.
+On Unix shells use `PULSEOPS_E2E=1 dotnet test tests/PulseOps.EndToEndTests --no-build`. For alternate launcher ports, set `PULSEOPS_E2E_COLLECTOR` and `PULSEOPS_E2E_DEMO` to the printed loopback origins. The browser checks exercise the demo against disposable data, including scoped incident triage, correlated spans, browser and startup errors, and the business workflow with telemetry requests blocked. If browser downloads need an allowlisted internal mirror, use your organisation's Playwright distribution.
 
 On macOS ARM64 with .NET SDK 10.0.404, two Release publishes of the demo kept the mock business workflow the same and removed the SDK reference, registration, handlers, operation and error hooks, and bootstrap from the baseline. The per-asset Brotli totals under `wwwroot`, excluding the deliberately broken startup page, were 2,843,788 bytes with PulseOps and 2,796,507 bytes without it. The measured increase was **47,281 bytes (46.17 KiB)**. The SDK WebCIL assembly occupied 25,819 Brotli bytes and the startup bridge 3,485 Brotli bytes. This measures packaged browser assets and includes changes from trimming. System CPU and runtime memory require additional profiling.
 

@@ -8,7 +8,7 @@ internal static class DemoData
     private static readonly string[] Labels =
         ["Finance Reporting", "Payments Gateway", "Treasury Console"];
 
-    public static AppScope[] Scopes() =>
+    public static AppScope[] Scopes(string browserOrigin) =>
     [
         Demo("finance-reports", "production", Labels[0], ["sap-reporting", "load-report", "report-render"]),
         Demo("payments-gateway", "production", Labels[1], ["payments-status", "load-payments", "payments-view"]),
@@ -16,7 +16,7 @@ internal static class DemoData
         new AppScope
         {
             Application = "finance-demo", Environment = "demo", Label = "Finance Demo Application", Demo = true,
-            IngestToken = DemoToken, StartupOrigins = ["http://localhost:5091"],
+            IngestToken = DemoToken, StartupOrigins = [browserOrigin],
             AllowedNames = ["report-api", "generate-report", "download-report", "parse-report", "render-grid", "sign-in",
                 "managed-exception", "render-exception", "unobserved-task", "javascript-error", "promise-rejection",
                 "finance-workspace", "lcp", "inp", "cls", "fcp", "ttfb", "navigation-duration", "long-task-count",
@@ -52,7 +52,7 @@ internal static class DemoData
 
     public static void Seed(Storage storage, PlatformOptions options, DateTimeOffset now)
     {
-        var scopes = Scopes();
+        var scopes = Scopes(options.DemoBrowserOrigin);
         for (var scopeIndex = 0; scopeIndex < Labels.Length; scopeIndex++)
         {
             var scope = options.Scopes.Single(s => s.Application == scopes[scopeIndex].Application);
